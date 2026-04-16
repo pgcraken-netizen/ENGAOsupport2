@@ -1,60 +1,64 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// 認証不要なパス
+// 認証不要なパス（前方一致）
 const PUBLIC_PATHS = [
   '/login',
-  '/api/line/webhook',
-  '/api/line/action',
-  '/api/auth/login',
-  '/api/cron',
+  '/api/line/',          // LINE Webhook・Action
+  '/api/auth/',          // ログイン・ログアウト
+  '/api/cron/',          // Cron jobs (Bearer認証で保護)
+  '/_next/',
+  '/favicon.ico',
+];
+
+// 認証が必要なページパス
+const PROTECTED_PAGE_PATHS = [
+  '/dashboard',
+  '/records',
+  '/patients',
+  '/alerts',
+  '/reports',
+  '/staff',
 ];
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Public pathは認証スキップ
+  // Public paths はそのまま通す
   if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
     return NextResponse.next();
   }
 
-  // 管理画面・API は認証必須
-  const isProtected =
-    pathname.startsWith('/dashboard') ||
-    pathname.startsWith('/records') ||
-    pathname.startsWith('/patients') ||
-    pathname.startsWith('/alerts') ||
-    pathname.startsWith('/reports') ||
-    pathname.startsWith('/staff') ||
-    pathname.startsWith('/api/auth/logout') ||
-    pathname.startsWith('/api/records') ||
-    pathname.startsWith('/api/patients') ||
-    pathname.startsWith('/api/alerts') ||
-    pathname.startsWith('/api/reports') ||
-    pathname.startsWith('/api/ai') ||
-    pathname.startsWith('/api/staff');
+  // ルートパスはリダイレクト
+  if (pathname === '/') {
+    return NextResponse.next();
+  }
 
-  if (!isProtected) return NextResponse.next();
+  // 管理画面ページのみ認証チェック（APIはチェックしない）
+  const isProtectedPage = PROTECTED_PAGE_PATHS.some((p) =>
+    pathname === p || pathname.startsWith(`${p}/`)
+  );
+
+  if (!isProtectedPage) {
+    return NextResponse.next();
+  }
 
   const token = request.cookies.get('session-token')?.value;
 
-  // 開発環境ではトークンなしでも通す（本番では削除推奨）
-  if (process.env.NODE_ENV === 'development' && !token) {
+  // 開発環境ではスキップ
+  if (process.env.NODE_ENV !== 'production') {
     return NextResponse.next();
   }
 
   if (!token) {
-    // APIリクエストには401を返す
-    if (pathname.startsWith('/api/')) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    return NextResponse.redirect(new URL('/login', request.url));
+    const loginUrl = new URL('/login', request.url);
+    loginUrl.searchParams.set('redirect', pathname);
+    return NextResponse.redirect(loginUrl);
   }
 
   return NextResponse.next();
 }
 
 export const config = {
-  matcher: [
-    '/((?!_next/static|_next/image|favicon.ico).*)',
-  ],
+  // _next/static, _next/image, favicon.ico は除外
+  matcher: ['/((?!_next/static|_next/image|favicon\\.ico).*)'],
 };
