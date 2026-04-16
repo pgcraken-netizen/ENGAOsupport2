@@ -5,9 +5,6 @@ export function formatDateTime(dateStr: string): string {
   return format(new Date(dateStr), 'yyyy/MM/dd HH:mm', { locale: ja });
 }
 
-export function formatDate(dateStr: string): string {
-  return format(new Date(dateStr), 'yyyy/MM/dd', { locale: ja });
-}
 
 export function formatTime(dateStr: string): string {
   return format(new Date(dateStr), 'HH:mm', { locale: ja });

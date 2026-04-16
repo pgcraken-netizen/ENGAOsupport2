@@ -9,6 +9,7 @@ import {
   Users,
   Bell,
   FileText,
+  UserCog,
 } from 'lucide-react';
 
 const navItems = [
@@ -17,6 +18,7 @@ const navItems = [
   { href: '/patients', label: '利用者', icon: Users },
   { href: '/alerts', label: 'アラート', icon: Bell },
   { href: '/reports', label: '申し送り', icon: FileText },
+  { href: '/staff', label: 'スタッフ', icon: UserCog },
 ];
 
 export function Sidebar() {
