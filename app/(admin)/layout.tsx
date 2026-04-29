@@ -1,6 +1,7 @@
+import { ReactNode } from 'react';
 import { Sidebar } from '@/components/layout/Sidebar';
 
-export default function AdminLayout({ children }: { children: React.ReactNode }) {
+export default function AdminLayout({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-screen bg-engao-bg overflow-hidden">
       <Sidebar />
