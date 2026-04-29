@@ -1,7 +1,7 @@
 import { createServiceClient } from '@/lib/supabase/server';
 import { Alert, AlertInput } from '@/types/alert';
 import { Patient } from '@/types/patient';
-import { CareRecord } from '@/types/record';
+import { CareRecord, isAnomaly, AlertLevel } from '@/types/record';
 
 async function getActivePatientsForFacility(facilityId: string): Promise<Patient[]> {
   const supabase = createServiceClient();
@@ -14,10 +14,7 @@ async function getActivePatientsForFacility(facilityId: string): Promise<Patient
   return (data ?? []) as Patient[];
 }
 
-async function getPatientRecordsForDate(
-  patientId: string,
-  date: Date
-): Promise<CareRecord[]> {
+async function getPatientRecordsForDate(patientId: string, date: Date): Promise<CareRecord[]> {
   const supabase = createServiceClient();
   const dateStr = date.toISOString().split('T')[0];
   const { data } = await supabase
@@ -37,7 +34,6 @@ async function getRecentRecords(patientId: string, count: number): Promise<CareR
     .select('*')
     .eq('patient_id', patientId)
     .eq('status', 'confirmed')
-    .not('condition', 'is', null)
     .order('recorded_at', { ascending: false })
     .limit(count);
   return (data ?? []) as CareRecord[];
@@ -56,17 +52,13 @@ async function getIncidentRecordsToday(patientId: string, date: Date): Promise<C
   return (data ?? []) as CareRecord[];
 }
 
-async function saveAlertsIfNotExists(
-  facilityId: string,
-  alerts: AlertInput[]
-): Promise<Alert[]> {
+async function saveAlertsIfNotExists(facilityId: string, alerts: AlertInput[]): Promise<Alert[]> {
   if (alerts.length === 0) return [];
   const supabase = createServiceClient();
   const today = new Date().toISOString().split('T')[0];
 
   const newAlerts: Alert[] = [];
   for (const alert of alerts) {
-    // 当日同じタイプのアラートが既に存在するか確認
     const { data: existing } = await supabase
       .from('alerts')
       .select('id')
@@ -105,33 +97,46 @@ export async function detectAlerts(facilityId: string): Promise<Alert[]> {
       });
     }
 
-    // B. 3回連続ネガティブ状態
+    // B. 5段階評価ベースの連続異常検知
     const recentRecords = await getRecentRecords(patient.id, 3);
-    const negativeConditions = ['不良', '要観察'];
-    if (
-      recentRecords.length >= 3 &&
-      recentRecords.every((r) => negativeConditions.includes(r.condition ?? ''))
-    ) {
+
+    let consecutiveAnomaly = 0;
+    for (const rec of recentRecords) {
+      const hasAnomaly = isAnomaly(rec.meal, rec.health, rec.excretion, rec.hydration)
+        || ['不良', '要観察'].includes(rec.condition ?? '');
+      if (hasAnomaly) consecutiveAnomaly++;
+      else break;
+    }
+
+    const alertLevel: AlertLevel =
+      consecutiveAnomaly >= 3 ? '警告' :
+      consecutiveAnomaly >= 2 ? '注意' :
+      consecutiveAnomaly >= 1 ? '観察' : '正常';
+
+    if (alertLevel !== '正常' && recentRecords.length > 0) {
+      const severity = alertLevel === '警告' ? 'critical' : alertLevel === '注意' ? 'warning' : 'info';
       alerts.push({
         patient_id: patient.id,
         type: 'negative_streak',
-        severity: 'warning',
-        message: `${patient.name}：${recentRecords[0].condition}状態が3回連続で記録されています`,
-        detail: { conditions: recentRecords.map((r) => r.condition) },
-        triggered_records: recentRecords.map((r) => r.id),
+        severity,
+        message: `${patient.name}：${consecutiveAnomaly}回連続で異常が記録されています（${alertLevel}）`,
+        detail: { streak: consecutiveAnomaly, alertLevel },
+        triggered_records: recentRecords.slice(0, consecutiveAnomaly).map(r => r.id),
       });
     }
 
     // C. インシデント検知
     const incidentRecords = await getIncidentRecordsToday(patient.id, today);
     for (const record of incidentRecords) {
-      alerts.push({
-        patient_id: patient.id,
-        type: 'incident',
-        severity: 'critical',
-        message: `${patient.name}：${record.incident_keywords.join('・')}が報告されています`,
-        triggered_records: [record.id],
-      });
+      if (record.incident_keywords?.length) {
+        alerts.push({
+          patient_id: patient.id,
+          type: 'incident',
+          severity: 'critical',
+          message: `${patient.name}：${record.incident_keywords.join('・')}が報告されています`,
+          triggered_records: [record.id],
+        });
+      }
     }
   }
 

@@ -3,9 +3,12 @@ import { NextRequest, NextResponse } from 'next/server';
 // 認証不要なパス（前方一致）
 const PUBLIC_PATHS = [
   '/login',
+  '/liff',               // LINEミニアプリ（LIFF認証）
+  '/api/liff/',          // LIFF API
   '/api/line/',          // LINE Webhook・Action
   '/api/auth/',          // ログイン・ログアウト
   '/api/cron/',          // Cron jobs (Bearer認証で保護)
+  '/api/patients',       // LIFF患者一覧（認証不要）
   '/_next/',
   '/favicon.ico',
 ];

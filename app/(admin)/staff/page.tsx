@@ -2,10 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { TopBar } from '@/components/layout/TopBar';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { UserPlus, Trash2 } from 'lucide-react';
+import { UserPlus, Trash2, CheckCircle, Clock, Smartphone } from 'lucide-react';
 
 interface StaffMember {
   id: string;
@@ -15,12 +13,19 @@ interface StaffMember {
   line_user_id: string | null;
   display_name: string | null;
   is_active: boolean;
+  is_approved: boolean;
 }
 
 const roleLabel: Record<string, string> = {
   admin: '管理者',
   leader: 'リーダー',
   staff: 'スタッフ',
+};
+
+const roleColors: Record<string, string> = {
+  admin: 'bg-engao-green text-white',
+  leader: 'bg-engao-green-light text-engao-green-dark',
+  staff: 'bg-engao-bg text-engao-sub border border-engao-border',
 };
 
 export default function StaffPage() {
@@ -42,27 +47,21 @@ export default function StaffPage() {
     }
   };
 
-  useEffect(() => {
-    fetchStaff();
-  }, []);
+  useEffect(() => { fetchStaff(); }, []);
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
     setSaving(true);
     try {
-      // 最初の施設IDを取得
       const pRes = await fetch('/api/patients?limit=1');
       const pData = await pRes.json();
       const facilityId = pData.data?.[0]?.facility_id;
-      if (!facilityId) {
-        alert('施設が見つかりません');
-        return;
-      }
+      if (!facilityId) { alert('施設が見つかりません'); return; }
       await fetch('/api/staff', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ facility_id: facilityId, name: newName.trim(), role: newRole }),
+        body: JSON.stringify({ facility_id: facilityId, name: newName.trim(), role: newRole, is_approved: true }),
       });
       setNewName('');
       setShowForm(false);
@@ -70,6 +69,15 @@ export default function StaffPage() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleApprove = async (id: string) => {
+    await fetch(`/api/staff/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_approved: true }),
+    });
+    fetchStaff();
   };
 
   const handleDeactivate = async (id: string, name: string) => {
@@ -82,127 +90,173 @@ export default function StaffPage() {
     fetchStaff();
   };
 
+  const pendingStaff = staffList.filter(s => s.is_active && !s.is_approved);
+  const activeStaff = staffList.filter(s => s.is_active && s.is_approved);
+  const inactiveStaff = staffList.filter(s => !s.is_active);
+
   return (
     <div>
       <TopBar title="スタッフ管理" />
       <div className="p-6 max-w-3xl space-y-4">
+
         <div className="flex justify-end">
-          <Button onClick={() => setShowForm(!showForm)} size="sm">
+          <Button
+            onClick={() => setShowForm(!showForm)}
+            size="sm"
+            className="bg-engao-green hover:bg-engao-green-dark text-white"
+          >
             <UserPlus className="h-4 w-4 mr-1.5" />
             スタッフ追加
           </Button>
         </div>
 
         {showForm && (
-          <Card>
-            <CardContent className="pt-4">
-              <form onSubmit={handleAdd} className="flex gap-3 items-end">
-                <div className="flex-1">
-                  <label className="text-xs text-gray-500 block mb-1">氏名</label>
-                  <input
-                    type="text"
-                    value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
-                    placeholder="山田 花子"
-                    required
-                    className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500 block mb-1">権限</label>
-                  <select
-                    value={newRole}
-                    onChange={(e) => setNewRole(e.target.value)}
-                    className="border border-gray-300 rounded-md px-3 py-1.5 text-sm"
-                  >
-                    <option value="staff">スタッフ</option>
-                    <option value="leader">リーダー</option>
-                    <option value="admin">管理者</option>
-                  </select>
-                </div>
-                <Button type="submit" disabled={saving} size="sm">
-                  {saving ? '追加中...' : '追加'}
-                </Button>
-                <Button variant="ghost" size="sm" onClick={() => setShowForm(false)}>
-                  キャンセル
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
+          <div className="bg-white rounded-xl border border-engao-border p-5">
+            <h3 className="text-sm font-bold text-engao-text mb-4">スタッフ追加（管理者手動）</h3>
+            <form onSubmit={handleAdd} className="flex gap-3 items-end flex-wrap">
+              <div className="flex-1 min-w-32">
+                <label className="text-xs text-engao-sub block mb-1">氏名</label>
+                <input
+                  type="text"
+                  value={newName}
+                  onChange={e => setNewName(e.target.value)}
+                  placeholder="山田 花子"
+                  required
+                  className="w-full border border-engao-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-engao-green"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-engao-sub block mb-1">権限</label>
+                <select
+                  value={newRole}
+                  onChange={e => setNewRole(e.target.value)}
+                  className="border border-engao-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-engao-green"
+                >
+                  <option value="staff">スタッフ</option>
+                  <option value="leader">リーダー</option>
+                  <option value="admin">管理者</option>
+                </select>
+              </div>
+              <Button type="submit" disabled={saving} size="sm"
+                className="bg-engao-green hover:bg-engao-green-dark text-white">
+                {saving ? '追加中...' : '追加'}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setShowForm(false)}>キャンセル</Button>
+            </form>
+          </div>
         )}
 
-        <Card>
-          <CardHeader>
-            <CardTitle>スタッフ一覧</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {loading ? (
-              <p className="text-sm text-gray-400 text-center py-8">読み込み中...</p>
-            ) : (
-              <div className="divide-y divide-gray-100">
-                {staffList.map((s) => (
-                  <div key={s.id} className="py-3 flex items-center gap-3">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-gray-900">{s.name}</span>
-                        <Badge variant={s.role === 'admin' ? 'default' : 'secondary'}>
-                          {roleLabel[s.role] ?? s.role}
-                        </Badge>
-                        {!s.is_active && (
-                          <Badge variant="outline">無効</Badge>
-                        )}
+        {/* 承認待ち */}
+        {pendingStaff.length > 0 && (
+          <div className="bg-white rounded-xl border border-engao-orange overflow-hidden">
+            <div className="flex items-center gap-2 px-4 py-3 bg-engao-orange-light border-b border-engao-orange">
+              <Clock className="h-4 w-4 text-engao-warn" />
+              <span className="text-sm font-bold text-engao-warn">承認待ち ({pendingStaff.length})</span>
+            </div>
+            <div className="divide-y divide-engao-border">
+              {pendingStaff.map(s => (
+                <div key={s.id} className="px-4 py-3 flex items-center gap-3">
+                  <div className="flex-1">
+                    <span className="font-medium text-engao-text">{s.name}</span>
+                    {s.display_name && s.display_name !== s.name && (
+                      <span className="text-xs text-engao-sub ml-2">（LINE: {s.display_name}）</span>
+                    )}
+                    {s.line_user_id && (
+                      <div className="flex items-center gap-1 mt-0.5">
+                        <Smartphone className="h-3 w-3 text-engao-green" />
+                        <span className="text-xs text-engao-green">LINE連携済</span>
                       </div>
-                      <div className="flex items-center gap-3 mt-0.5">
-                        {s.line_user_id ? (
-                          <span className="text-xs text-green-600">LINE連携済</span>
-                        ) : (
-                          <span className="text-xs text-gray-400">LINE未連携</span>
-                        )}
-                        {s.display_name && (
-                          <span className="text-xs text-gray-400">表示名: {s.display_name}</span>
-                        )}
-                      </div>
-                    </div>
-                    {s.is_active && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-red-500 hover:text-red-700 hover:bg-red-50"
-                        onClick={() => handleDeactivate(s.id, s.name)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
                     )}
                   </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>LINE連携について</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-sm text-gray-600 space-y-2">
-              <p>
-                スタッフがLINEボットを友だち追加すると、LINE IDが自動的に記録に紐付けられます。
-              </p>
-              <p>
-                管理者メニューからスタッフのLINE IDを手動設定することもできます。
-              </p>
-              <div className="bg-blue-50 rounded-lg p-3 mt-3">
-                <p className="text-xs font-medium text-blue-800">LINE連携手順</p>
-                <ol className="text-xs text-blue-700 mt-1 space-y-0.5 list-decimal list-inside">
-                  <li>スタッフがボットを友だち追加</li>
-                  <li>LINEグループにボットを招待</li>
-                  <li>グループに投稿するとスタッフとして記録される</li>
-                </ol>
-              </div>
+                  <button
+                    onClick={() => handleApprove(s.id)}
+                    className="flex items-center gap-1.5 bg-engao-green text-white text-xs px-3 py-1.5 rounded-full hover:bg-engao-green-dark transition-colors"
+                  >
+                    <CheckCircle className="h-3.5 w-3.5" />
+                    承認
+                  </button>
+                </div>
+              ))}
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        )}
+
+        {/* アクティブスタッフ */}
+        <div className="bg-white rounded-xl border border-engao-border overflow-hidden">
+          <div className="px-4 py-3 border-b border-engao-border">
+            <span className="text-sm font-bold text-engao-text">スタッフ一覧 ({activeStaff.length})</span>
+          </div>
+          {loading ? (
+            <div className="p-8 text-center text-engao-sub text-sm">読み込み中...</div>
+          ) : activeStaff.length === 0 ? (
+            <div className="p-8 text-center text-engao-sub text-sm">スタッフが登録されていません</div>
+          ) : (
+            <div className="divide-y divide-engao-border">
+              {activeStaff.map(s => (
+                <div key={s.id} className="px-4 py-3 flex items-center gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-engao-text">{s.name}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${roleColors[s.role] ?? roleColors.staff}`}>
+                        {roleLabel[s.role] ?? s.role}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 mt-0.5">
+                      {s.line_user_id ? (
+                        <span className="text-xs text-engao-green flex items-center gap-0.5">
+                          <Smartphone className="h-3 w-3" />LINE連携済
+                        </span>
+                      ) : (
+                        <span className="text-xs text-engao-sub">LINE未連携</span>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    className="text-red-400 hover:text-red-600 p-1.5 rounded hover:bg-red-50 transition-colors"
+                    onClick={() => handleDeactivate(s.id, s.name)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* LIFF情報 */}
+        <div className="bg-white rounded-xl border border-engao-border p-5">
+          <h3 className="text-sm font-bold text-engao-text mb-3">LINEミニアプリ（LIFF）について</h3>
+          <div className="text-sm text-engao-sub space-y-2">
+            <p>スタッフは以下の手順でLINEミニアプリを使用できます：</p>
+            <ol className="list-decimal list-inside space-y-1 text-sm text-engao-sub">
+              <li>LINEでミニアプリURLを開く</li>
+              <li>名前を入力して登録申請</li>
+              <li>管理者が上記「承認」ボタンで承認</li>
+              <li>承認後、ミニアプリで記録入力が可能</li>
+            </ol>
+            <div className="bg-engao-green-light rounded-lg p-3 mt-3">
+              <p className="text-xs font-medium text-engao-green-dark">LIFF ID設定</p>
+              <p className="text-xs text-engao-green-dark mt-1">
+                環境変数 <code className="bg-white px-1 rounded">NEXT_PUBLIC_LIFF_ID</code> にLIFF IDを設定してください
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {inactiveStaff.length > 0 && (
+          <details className="bg-white rounded-xl border border-engao-border overflow-hidden">
+            <summary className="px-4 py-3 text-sm text-engao-sub cursor-pointer">
+              無効化済 ({inactiveStaff.length})
+            </summary>
+            <div className="divide-y divide-engao-border px-4">
+              {inactiveStaff.map(s => (
+                <div key={s.id} className="py-2 text-sm text-engao-sub opacity-60">
+                  {s.name}
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
       </div>
     </div>
   );
