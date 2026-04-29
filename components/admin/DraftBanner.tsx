@@ -12,16 +12,16 @@ export function DraftBanner({ count, onBulkConfirm }: DraftBannerProps) {
   if (count === 0) return null;
 
   return (
-    <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 flex items-center justify-between gap-3">
+    <div className="bg-engao-orange-light border border-engao-orange rounded-xl p-3 flex items-center justify-between gap-3">
       <div className="flex items-center gap-2">
-        <AlertCircle className="h-4 w-4 text-orange-600 flex-shrink-0" />
-        <span className="text-sm text-orange-800 font-medium">
+        <AlertCircle className="h-4 w-4 text-engao-warn flex-shrink-0" />
+        <span className="text-sm text-engao-warn font-medium">
           未確定の記録が {count} 件あります
         </span>
       </div>
       {onBulkConfirm && (
         <Button size="sm" variant="outline" onClick={onBulkConfirm}
-          className="border-orange-300 text-orange-700 hover:bg-orange-100">
+          className="border-engao-orange text-engao-warn hover:bg-white">
           一括確定
         </Button>
       )}

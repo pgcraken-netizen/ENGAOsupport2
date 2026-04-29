@@ -30,7 +30,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const supabase = createServiceClient();
     const body = await request.json();
-    const { facility_id, name, name_kana, role = 'staff', line_user_id } = body;
+    const { facility_id, name, name_kana, role = 'staff', line_user_id, is_approved = true } = body;
 
     if (!facility_id || !name) {
       return NextResponse.json({ error: 'facility_id and name are required' }, { status: 400 });
@@ -38,7 +38,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     const { data, error } = await supabase
       .from('staff')
-      .insert({ facility_id, name, name_kana, role, line_user_id })
+      .insert({ facility_id, name, name_kana, role, line_user_id, is_approved })
       .select()
       .single();
 
