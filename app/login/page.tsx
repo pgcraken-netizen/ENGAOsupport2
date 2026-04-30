@@ -8,7 +8,6 @@ function LoginForm() {
   const searchParams = useSearchParams();
   const redirectTo = searchParams.get('redirect') ?? '/dashboard';
 
-  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -21,7 +20,7 @@ function LoginForm() {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ password }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -40,23 +39,8 @@ function LoginForm() {
   return (
     <form onSubmit={handleLogin} className="space-y-4">
       <div>
-        <label htmlFor="email" className="block text-sm font-medium text-engao-text mb-1.5">
-          メールアドレス
-        </label>
-        <input
-          id="email"
-          type="email"
-          required
-          autoComplete="email"
-          value={email}
-          onChange={e => setEmail(e.target.value)}
-          className="w-full border border-engao-border rounded-xl px-4 py-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-engao-green"
-          placeholder="admin@example.com"
-        />
-      </div>
-      <div>
         <label htmlFor="password" className="block text-sm font-medium text-engao-text mb-1.5">
-          パスワード
+          管理者パスワード
         </label>
         <input
           id="password"
@@ -66,7 +50,7 @@ function LoginForm() {
           value={password}
           onChange={e => setPassword(e.target.value)}
           className="w-full border border-engao-border rounded-xl px-4 py-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-engao-green"
-          placeholder="••••••••"
+          placeholder="パスワードを入力"
         />
       </div>
 
@@ -96,16 +80,12 @@ export default function LoginPage() {
             <span className="text-2xl">🏠</span>
           </div>
           <h1 className="text-2xl font-bold text-engao-green">えんがお</h1>
-          <p className="text-sm text-engao-sub mt-1">管理者ログイン</p>
+          <p className="text-sm text-engao-sub mt-1">管理画面</p>
         </div>
 
         <Suspense fallback={<div className="text-center text-sm text-engao-sub">読み込み中...</div>}>
           <LoginForm />
         </Suspense>
-
-        <p className="text-xs text-engao-sub text-center">
-          ※ 管理者から発行されたアカウントでログインしてください
-        </p>
       </div>
     </div>
   );
