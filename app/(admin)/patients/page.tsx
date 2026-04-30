@@ -29,15 +29,16 @@ export default function PatientsPage() {
     if (!form.name.trim()) return;
     setSaving(true);
     try {
-      const fRes = await fetch('/api/patients');
+      const fRes = await fetch('/api/facilities');
       const fData = await fRes.json();
-      const facilityId = fData.data?.[0]?.facility_id;
+      const facilityId = fData.data?.id;
+      if (!facilityId) throw new Error('施設情報の取得に失敗しました');
 
       const aliasArray = form.aliases
         ? form.aliases.split(/[,、]+/).map((s: string) => s.trim()).filter(Boolean)
         : [];
 
-      await fetch('/api/patients', {
+      const res = await fetch('/api/patients', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -49,6 +50,7 @@ export default function PatientsPage() {
           aliases: aliasArray,
         }),
       });
+      if (!res.ok) throw new Error('追加に失敗しました');
       setForm({ name: '', name_kana: '', room_number: '', care_level: '', aliases: '' });
       setShowForm(false);
       fetchPatients();
