@@ -8,25 +8,21 @@ export async function GET(): Promise<NextResponse> {
   try {
     const supabase = createServiceClient();
 
-    const { data: existing, error: fetchError } = await supabase
+    const { data: existing } = await supabase
       .from('facilities')
       .select('*')
       .order('created_at')
       .limit(1)
-      .single();
+      .maybeSingle();
 
-    if (existing && !fetchError) {
+    if (existing) {
       return NextResponse.json({ data: existing });
     }
 
-    // No facility exists — create the default one
+    // No facility exists — upsert the default one (handles duplicate code gracefully)
     const { data: created, error: createError } = await supabase
       .from('facilities')
-      .insert({
-        name: '一般社団法人えんがお',
-        code: 'engao',
-        settings: {},
-      })
+      .upsert({ name: '一般社団法人えんがお', code: 'engao', settings: {} }, { onConflict: 'code' })
       .select()
       .single();
 

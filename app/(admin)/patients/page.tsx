@@ -13,6 +13,8 @@ export default function PatientsPage() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: '', name_kana: '', room_number: '', care_level: '', aliases: '' });
   const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [seeding, setSeeding] = useState(false);
 
   const fetchPatients = async () => {
     setLoading(true);
@@ -28,11 +30,12 @@ export default function PatientsPage() {
     e.preventDefault();
     if (!form.name.trim()) return;
     setSaving(true);
+    setFormError('');
     try {
       const fRes = await fetch('/api/facilities');
       const fData = await fRes.json();
       const facilityId = fData.data?.id;
-      if (!facilityId) throw new Error('施設情報の取得に失敗しました');
+      if (!facilityId) throw new Error('施設情報の取得に失敗しました: ' + JSON.stringify(fData));
 
       const aliasArray = form.aliases
         ? form.aliases.split(/[,、]+/).map((s: string) => s.trim()).filter(Boolean)
@@ -50,12 +53,33 @@ export default function PatientsPage() {
           aliases: aliasArray,
         }),
       });
-      if (!res.ok) throw new Error('追加に失敗しました');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error ?? '追加に失敗しました');
+      }
       setForm({ name: '', name_kana: '', room_number: '', care_level: '', aliases: '' });
       setShowForm(false);
-      fetchPatients();
+      await fetchPatients();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : '追加に失敗しました');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSeedPatients = async () => {
+    if (!confirm('17名の利用者を一括登録しますか？（既存の利用者は削除されます）')) return;
+    setSeeding(true);
+    try {
+      const res = await fetch('/api/patients/seed', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? '一括登録に失敗しました');
+      alert(`${data.inserted}名を登録しました`);
+      await fetchPatients();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '一括登録に失敗しました');
+    } finally {
+      setSeeding(false);
     }
   };
 
@@ -66,7 +90,16 @@ export default function PatientsPage() {
       <TopBar title="利用者一覧" />
       <div className="p-6 max-w-3xl space-y-4">
 
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleSeedPatients}
+            disabled={seeding}
+            className="text-engao-sub text-xs"
+          >
+            {seeding ? '登録中...' : '17名一括登録'}
+          </Button>
           <Button
             size="sm"
             onClick={() => setShowForm(!showForm)}
@@ -135,12 +168,15 @@ export default function PatientsPage() {
                   className="w-full border border-engao-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-engao-green"
                 />
               </div>
+              {formError && (
+                <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">{formError}</p>
+              )}
               <div className="flex gap-2 pt-1">
                 <Button type="submit" size="sm" disabled={saving}
                   className="bg-engao-green hover:bg-engao-green-dark text-white">
                   {saving ? '追加中...' : '追加'}
                 </Button>
-                <Button type="button" variant="ghost" size="sm" onClick={() => setShowForm(false)}>
+                <Button type="button" variant="ghost" size="sm" onClick={() => { setShowForm(false); setFormError(''); }}>
                   キャンセル
                 </Button>
               </div>
