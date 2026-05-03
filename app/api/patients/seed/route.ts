@@ -27,26 +27,22 @@ export async function POST(): Promise<NextResponse> {
   try {
     const supabase = createServiceClient();
 
-    // Get or create default facility
-    let facilityId: string;
-    const { data: existing } = await supabase
+    // Get or create default facility (upsert to avoid duplicate code error)
+    const { data: facility, error: facilityError } = await supabase
       .from('facilities')
+      .upsert(
+        { name: '一般社団法人えんがお', code: 'engao', settings: {} },
+        { onConflict: 'code' }
+      )
       .select('id')
-      .order('created_at')
-      .limit(1)
       .single();
 
-    if (existing?.id) {
-      facilityId = existing.id;
-    } else {
-      const { data: created, error } = await supabase
-        .from('facilities')
-        .insert({ name: '一般社団法人えんがお', code: 'engao', settings: {} })
-        .select('id')
-        .single();
-      if (error || !created) throw error ?? new Error('facility creation failed');
-      facilityId = created.id;
+    if (facilityError || !facility) {
+      const msg = facilityError?.message ?? 'facility creation failed';
+      return NextResponse.json({ error: `施設の作成に失敗: ${msg}` }, { status: 500 });
     }
+
+    const facilityId = facility.id;
 
     // Delete existing patients for this facility to avoid duplicates
     await supabase.from('patients').delete().eq('facility_id', facilityId);
@@ -59,12 +55,22 @@ export async function POST(): Promise<NextResponse> {
       aliases: [],
     }));
 
-    const { data, error } = await supabase.from('patients').insert(rows).select();
-    if (error) throw error;
+    const { data, error: insertError } = await supabase
+      .from('patients')
+      .insert(rows)
+      .select();
+
+    if (insertError) {
+      return NextResponse.json(
+        { error: `利用者の登録に失敗: ${insertError.message}` },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({ inserted: data?.length ?? 0, facility_id: facilityId });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : JSON.stringify(err);
     console.error('[seed patients error]', err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
