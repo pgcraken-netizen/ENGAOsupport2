@@ -16,5 +16,5 @@ export function createClient() {
     );
   }
 
-  return createBrowserClient(supabaseUrl, supabaseKey);
+  return createBrowserClient(supabaseUrl.replace(/\/$/, ''), supabaseKey);
 }

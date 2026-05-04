@@ -12,7 +12,7 @@ export function createServiceClient() {
     );
   }
 
-  return createClient(supabaseUrl, serviceRoleKey, {
+  return createClient(supabaseUrl.replace(/\/$/, ''), serviceRoleKey, {
     auth: {
       autoRefreshToken: false,
       persistSession: false,
