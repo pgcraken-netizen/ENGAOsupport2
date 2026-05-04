@@ -29,7 +29,8 @@ export async function GET(): Promise<NextResponse> {
     if (createError) throw createError;
     return NextResponse.json({ data: created }, { status: 201 });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : JSON.stringify(err);
     console.error('[GET facilities error]', err);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
