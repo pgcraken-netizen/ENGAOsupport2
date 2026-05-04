@@ -1,11 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { CareRecord } from '@/types/record';
+import { CareRecord, MEAL_NEGATIVE, HEALTH_NEGATIVE, EXCRETION_NEGATIVE, HYDRATION_NEGATIVE } from '@/types/record';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { formatDateTime } from '@/lib/utils/dateUtils';
-import { getConfidenceLabel, getConfidenceColor } from '@/lib/utils/confidenceLabel';
 import { CheckCircle, Edit2, ExternalLink } from 'lucide-react';
 
 interface RecordTableProps {
@@ -14,18 +13,26 @@ interface RecordTableProps {
   onEdit?: (id: string) => void;
 }
 
-const conditionVariant: Record<string, 'success' | 'warning' | 'destructive' | 'secondary'> = {
-  良好: 'success',
-  普通: 'warning',
-  不良: 'destructive',
-  要観察: 'secondary',
+const statusVariant: Record<string, 'default' | 'warning' | 'destructive'> = {
+  draft: 'warning', confirmed: 'default', rejected: 'destructive',
 };
+const statusLabel: Record<string, string> = {
+  draft: '未確定', confirmed: '確定済', rejected: '却下',
+};
+
+function ScorePill({ value, negatives }: { value: string | null | undefined; negatives: readonly string[] }) {
+  if (!value) return <span className="text-gray-300 text-xs">—</span>;
+  const isNeg = negatives.includes(value);
+  return (
+    <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
+      isNeg ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-700'
+    }`}>{value}</span>
+  );
+}
 
 export function RecordTable({ records, onConfirm, onEdit }: RecordTableProps) {
   if (records.length === 0) {
-    return (
-      <div className="text-center py-16 text-gray-400 text-sm">記録がありません</div>
-    );
+    return <div className="text-center py-16 text-gray-400 text-sm">記録がありません</div>;
   }
 
   return (
@@ -33,69 +40,63 @@ export function RecordTable({ records, onConfirm, onEdit }: RecordTableProps) {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-gray-100 text-left">
-            <th className="pb-3 pr-4 font-medium text-gray-500 whitespace-nowrap">日時</th>
-            <th className="pb-3 pr-4 font-medium text-gray-500 whitespace-nowrap">利用者</th>
-            <th className="pb-3 pr-4 font-medium text-gray-500 whitespace-nowrap">担当</th>
-            <th className="pb-3 pr-4 font-medium text-gray-500">ケア内容</th>
-            <th className="pb-3 pr-4 font-medium text-gray-500 whitespace-nowrap">状態</th>
-            <th className="pb-3 pr-4 font-medium text-gray-500 whitespace-nowrap">精度</th>
+            <th className="pb-3 pr-3 font-medium text-gray-500 whitespace-nowrap">日時</th>
+            <th className="pb-3 pr-3 font-medium text-gray-500 whitespace-nowrap">利用者</th>
+            <th className="pb-3 pr-3 font-medium text-gray-500 whitespace-nowrap">担当</th>
+            <th className="pb-3 pr-3 font-medium text-gray-500 whitespace-nowrap">食事</th>
+            <th className="pb-3 pr-3 font-medium text-gray-500 whitespace-nowrap">健康</th>
+            <th className="pb-3 pr-3 font-medium text-gray-500 whitespace-nowrap">排泄</th>
+            <th className="pb-3 pr-3 font-medium text-gray-500 whitespace-nowrap">水分</th>
+            <th className="pb-3 pr-3 font-medium text-gray-500">タグ</th>
+            <th className="pb-3 pr-3 font-medium text-gray-500 whitespace-nowrap">状態</th>
             <th className="pb-3 font-medium text-gray-500 whitespace-nowrap">操作</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-50">
-          {records.map((record) => {
+          {records.map(record => {
             const patientName =
               record.patient?.name ??
               (record.patient_candidates as Array<{ name: string }>)?.[0]?.name ??
               '未設定';
-
             return (
               <tr key={record.id} className="hover:bg-gray-50 group">
-                <td className="py-3 pr-4 text-gray-500 whitespace-nowrap text-xs">
+                <td className="py-3 pr-3 text-gray-500 whitespace-nowrap text-xs">
                   {formatDateTime(record.recorded_at)}
                 </td>
-                <td className="py-3 pr-4">
-                  <div className="flex items-center gap-1.5">
+                <td className="py-3 pr-3">
+                  <div className="flex items-center gap-1">
                     <span className="font-medium text-gray-900">{patientName}</span>
                     {record.patient?.room_number && (
                       <span className="text-xs text-gray-400">{record.patient.room_number}号室</span>
                     )}
                   </div>
                 </td>
-                <td className="py-3 pr-4 text-gray-600 whitespace-nowrap">
+                <td className="py-3 pr-3 text-gray-600 whitespace-nowrap text-xs">
                   {record.staff?.name ?? record.line_display_name ?? '—'}
                 </td>
-                <td className="py-3 pr-4">
-                  <div className="flex flex-wrap gap-1 max-w-xs">
-                    {record.care_tags.slice(0, 3).map((tag) => (
-                      <span
-                        key={tag}
-                        className="bg-blue-50 text-blue-700 text-xs px-1.5 py-0.5 rounded"
-                      >
+                <td className="py-3 pr-3"><ScorePill value={record.meal}      negatives={MEAL_NEGATIVE} /></td>
+                <td className="py-3 pr-3"><ScorePill value={record.health}    negatives={HEALTH_NEGATIVE} /></td>
+                <td className="py-3 pr-3"><ScorePill value={record.excretion} negatives={EXCRETION_NEGATIVE} /></td>
+                <td className="py-3 pr-3"><ScorePill value={record.hydration} negatives={HYDRATION_NEGATIVE} /></td>
+                <td className="py-3 pr-3">
+                  <div className="flex flex-wrap gap-1 max-w-[120px]">
+                    {record.care_tags.slice(0, 2).map(tag => (
+                      <span key={tag} className="bg-amber-50 text-amber-700 text-xs px-1.5 py-0.5 rounded">
                         {tag}
                       </span>
                     ))}
-                    {record.care_tags.length > 3 && (
-                      <span className="text-xs text-gray-400">+{record.care_tags.length - 3}</span>
+                    {record.care_tags.length > 2 && (
+                      <span className="text-xs text-gray-400">+{record.care_tags.length - 2}</span>
                     )}
                   </div>
                 </td>
-                <td className="py-3 pr-4">
-                  {record.condition ? (
-                    <Badge variant={conditionVariant[record.condition] ?? 'secondary'}>
-                      {record.condition}
-                    </Badge>
-                  ) : (
-                    <span className="text-gray-400 text-xs">—</span>
-                  )}
-                </td>
-                <td className="py-3 pr-4">
-                  <span className={`text-xs px-1.5 py-0.5 rounded ${getConfidenceColor(record.confidence)}`}>
-                    {getConfidenceLabel(record.confidence)}
-                  </span>
+                <td className="py-3 pr-3">
+                  <Badge variant={statusVariant[record.status] ?? 'secondary'}>
+                    {statusLabel[record.status]}
+                  </Badge>
                 </td>
                 <td className="py-3">
-                  <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <Link href={`/records/${record.id}`}>
                       <Button size="sm" variant="ghost" className="h-7 w-7 p-0">
                         <ExternalLink className="h-3.5 w-3.5" />
@@ -104,23 +105,13 @@ export function RecordTable({ records, onConfirm, onEdit }: RecordTableProps) {
                     {record.status === 'draft' && (
                       <>
                         {onEdit && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 w-7 p-0"
-                            onClick={() => onEdit(record.id)}
-                          >
+                          <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => onEdit(record.id)}>
                             <Edit2 className="h-3.5 w-3.5" />
                           </Button>
                         )}
                         {onConfirm && (
-                          <Button
-                            size="sm"
-                            className="h-7 px-2 text-xs"
-                            onClick={() => onConfirm(record.id)}
-                          >
-                            <CheckCircle className="h-3 w-3 mr-1" />
-                            確定
+                          <Button size="sm" className="h-7 px-2 text-xs" onClick={() => onConfirm(record.id)}>
+                            <CheckCircle className="h-3 w-3 mr-1" />確定
                           </Button>
                         )}
                       </>

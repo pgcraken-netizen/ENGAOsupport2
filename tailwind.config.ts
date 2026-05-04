@@ -11,6 +11,18 @@ const config: Config = {
       colors: {
         background: "var(--background)",
         foreground: "var(--foreground)",
+        // えんがお ブランドカラー
+        engao: {
+          bg:      "#FAFAF7",
+          green:   "#6BA368",
+          "green-dark": "#557F52",
+          "green-light": "#EBF3EA",
+          yellow:  "#F4B860",
+          "yellow-light": "#FDF3E0",
+          text:    "#333333",
+          sub:     "#777777",
+          border:  "#E5E5E0",
+        },
       },
     },
   },
