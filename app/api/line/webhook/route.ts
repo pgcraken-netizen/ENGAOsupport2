@@ -103,6 +103,7 @@ async function handleTextMessage(event: LineTextMessage) {
     is_incident: false,
     incident_keywords: [],
     parse_notes: null,
+    comment: null,
     ai_raw_output: {},
   }));
 
