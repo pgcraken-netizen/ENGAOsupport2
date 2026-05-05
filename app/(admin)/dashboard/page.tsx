@@ -97,7 +97,7 @@ export default function DashboardPage() {
                   key={record.id}
                   record={record}
                   onConfirm={() => { confirmOne(record.id); }}
-                  onRefresh={refetchDrafts}
+
                 />
               ))}
             </div>

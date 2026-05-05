@@ -85,11 +85,16 @@ export interface ParseResult {
   patient_name_in_text: string | null;
   patient_candidates: PatientCandidate[];
   care_tags: string[];
+  meal: MealScore | null;
+  health: HealthScore | null;
+  excretion: ExcretionScore | null;
+  hydration: HydrationScore | null;
   condition: Condition | null;
   condition_detail: string | null;
   confidence: number;
   is_incident: boolean;
   incident_keywords: string[];
   parse_notes: string | null;
+  comment: string | null;
   ai_raw_output: Record<string, unknown>;
 }
