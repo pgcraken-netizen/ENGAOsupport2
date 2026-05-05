@@ -1,16 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Next.js 14.x: @line/bot-sdk は ESM のため外部パッケージとして扱う
-  experimental: {
-    serverComponentsExternalPackages: ['@line/bot-sdk'],
-  },
+  // @line/bot-sdk は ESM のため外部パッケージとして扱う
+  serverExternalPackages: ['@line/bot-sdk'],
 
-  // Vercel デプロイ向け: 不要な警告を抑制
+  // Vercel デプロイ向け
   typescript: {
     ignoreBuildErrors: false,
-  },
-  eslint: {
-    ignoreDuringBuilds: false,
   },
 };
 

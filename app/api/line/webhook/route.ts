@@ -88,11 +88,15 @@ async function handleTextMessage(event: LineTextMessage) {
     // プロファイル取得失敗は無視
   }
 
-  // AI構造化処理
+  // AI構造化処理（5段階スコア含む）
   const parseResult = await parseRecord(text, facilityId).catch(() => ({
     patient_name_in_text: null,
     patient_candidates: [],
     care_tags: [],
+    meal: null,
+    health: null,
+    excretion: null,
+    hydration: null,
     condition: null,
     condition_detail: null,
     confidence: 0,
@@ -114,6 +118,10 @@ async function handleTextMessage(event: LineTextMessage) {
       patient_id: null,
       patient_candidates: parseResult.patient_candidates,
       care_tags: parseResult.care_tags,
+      meal: parseResult.meal ?? null,
+      health: parseResult.health ?? null,
+      excretion: parseResult.excretion ?? null,
+      hydration: parseResult.hydration ?? null,
       condition: parseResult.condition,
       condition_detail: parseResult.condition_detail,
       original_text: text,
@@ -136,7 +144,7 @@ async function handleTextMessage(event: LineTextMessage) {
     return;
   }
 
-  // Flex Message送信
+  // Flex Message送信（5スコア入り）
   const flex = buildConfirmFlex(record as CareRecord);
   await replyWithFallback(replyToken, lineUserId, flex as unknown as Parameters<typeof replyWithFallback>[2]);
 }
@@ -170,7 +178,7 @@ async function handlePostback(event: LinePostbackEvent) {
         .eq('id', recordId);
       await replyWithFallback(replyToken, lineUserId, {
         type: 'text',
-        text: '記録を確定しました。',
+        text: '✅ 記録を確定しました。',
       });
       break;
     }
@@ -247,12 +255,11 @@ async function handleFollow(event: LineFollowEvent) {
   const { replyToken, source } = event;
   await replyWithFallback(replyToken, source.userId, {
     type: 'text',
-    text: 'えんがおサポート2へようこそ！介護記録をLINEに投稿してください。AIが自動で整理します。',
+    text: 'えんがおサポートへようこそ！\n\nLINEグループに介護記録を投稿するだけで自動整理します。\n\n例）\n「小高さん 食事8割 体調良好 排泄正常 水分普通 特変なし」\n\nAIが内容を読み取り、確認メッセージをお送りします。',
   });
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  // 署名検証
   const signature = request.headers.get('x-line-signature');
   if (!signature) {
     return new NextResponse('Missing signature', { status: 401 });
@@ -271,7 +278,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return new NextResponse('Invalid JSON', { status: 400 });
   }
 
-  // 各イベントを処理（エラーでも200を返す）
   for (const event of payload.events ?? []) {
     try {
       if (event.type === 'message' && (event as LineTextMessage).message?.type === 'text') {
