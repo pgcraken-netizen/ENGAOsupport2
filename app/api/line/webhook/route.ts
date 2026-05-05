@@ -80,18 +80,24 @@ async function getDisplayName(
   }
 }
 
-/** 利用者名テキストからDB検索（部分一致・かな一致） */
+/** 利用者名テキストからDB検索（スペース区切りで各トークンを試す） */
 async function findPatient(text: string, facilityId: string) {
   const supabase = createServiceClient();
-  const query = text.trim().replace(/さん|様|くん|ちゃん$/g, '');
-  const { data } = await supabase
-    .from('patients')
-    .select('*')
-    .eq('facility_id', facilityId)
-    .eq('is_active', true)
-    .ilike('name', `%${query}%`)
-    .limit(1);
-  return data?.[0] ?? null;
+  // 全角・半角スペースで分割して各トークンを試す
+  const tokens = text.trim().split(/[\s　]+/);
+  for (const token of tokens) {
+    const query = token.replace(/さん|様|くん|ちゃん$/g, '');
+    if (query.length < 2) continue;
+    const { data } = await supabase
+      .from('patients')
+      .select('*')
+      .eq('facility_id', facilityId)
+      .eq('is_active', true)
+      .ilike('name', `%${query}%`)
+      .limit(1);
+    if (data?.[0]) return { patient: data[0], matchedToken: token };
+  }
+  return null;
 }
 
 /** 利用者の最新確定記録を取得 */
@@ -115,6 +121,7 @@ async function createDraftRecord(params: {
   patientId: string;
   lineUserId: string;
   displayName: string;
+  originalText: string;
   meal: MealScore;
   health: HealthScore;
   excretion: ExcretionScore;
@@ -135,6 +142,11 @@ async function createDraftRecord(params: {
       excretion: params.excretion,
       hydration: params.hydration,
       care_tags: [],
+      original_text: params.originalText,
+      confidence: 1,
+      is_incident: false,
+      incident_keywords: [],
+      patient_candidates: [],
       recorded_at: new Date().toISOString(),
     })
     .select()
@@ -166,21 +178,26 @@ async function handleTextMessage(event: LineTextMessage) {
 
   // 利用者名マッチング（20文字以内なら検索）
   if (text.length <= 20) {
-    const patient = await findPatient(text, facilityId);
-    if (patient) {
+    const result = await findPatient(text, facilityId);
+    if (result) {
+      const { patient } = result;
       // 前回記録をコピー or デフォルト
       const last = await getLastRecord(patient.id, facilityId);
       const meal      = (last?.meal      as MealScore)      ?? DEFAULT_MEAL;
       const health    = (last?.health    as HealthScore)    ?? DEFAULT_HEALTH;
       const excretion = (last?.excretion as ExcretionScore) ?? DEFAULT_EXCRETION;
       const hydration = (last?.hydration as HydrationScore) ?? DEFAULT_HYDRATION;
+      // 名前以外の部分をコメントとして保持
+      const tokens = text.split(/[\s　]+/);
+      const comment = tokens.filter(t => !t.includes(result.matchedToken.replace(/さん|様|くん|ちゃん$/, ''))).join(' ');
 
       const draft = await createDraftRecord({
         facilityId,
-        staffId:     staff?.id ?? null,
-        patientId:   patient.id,
+        staffId:      staff?.id ?? null,
+        patientId:    patient.id,
         lineUserId,
         displayName,
+        originalText: comment || `${patient.name} フォーム入力`,
         meal, health, excretion, hydration,
       }).catch(() => null);
 
