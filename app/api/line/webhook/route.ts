@@ -1,158 +1,236 @@
+/**
+ * LINE Webhook
+ *
+ * 記録フロー（新設計）:
+ *  1. スタッフがグループに利用者名（または略称）を送信
+ *  2. 前回記録をコピー or「全て健康」デフォルトで draft を作成
+ *  3. scoreFormFlex（ボタン式フォーム）を返信
+ *  4. スコアボタンタップ → postback(a:"ss") → DBを更新してフォーム再描画
+ *  5. 「記録する」ボタン → postback(a:"sr") → confirmed に確定
+ *
+ * 日時・担当名は LINE プロフィールから自動取得
+ */
+
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyLineSignature } from '@/lib/line/verify';
 import { createServiceClient } from '@/lib/supabase/server';
-import { parseRecord } from '@/lib/ai/parser';
-import { buildConfirmFlex } from '@/lib/line/flex/confirmFlex';
-import { buildEditMenuFlex, buildPatientSelectFlex, buildConditionSelectFlex } from '@/lib/line/flex/editFlex';
+import { buildScoreFormFlex, ScoreFormState } from '@/lib/line/flex/scoreFormFlex';
 import { replyWithFallback, getLineClient } from '@/lib/line/client';
-import { CareRecord } from '@/types/record';
-import { Patient } from '@/types/patient';
+import { MealScore, HealthScore, ExcretionScore, HydrationScore } from '@/types/record';
 
 export const runtime = 'nodejs';
 
+// ─── デフォルト値（全て健康） ─────────────────────────────────
+const DEFAULT_MEAL:      MealScore      = '完食';
+const DEFAULT_HEALTH:    HealthScore    = '良好';
+const DEFAULT_EXCRETION: ExcretionScore = '正常';
+const DEFAULT_HYDRATION: HydrationScore = '十分';
+
+// ─── LINE イベント型 ──────────────────────────────────────────
 interface LineTextMessage {
   type: 'message';
   replyToken: string;
-  source: { userId: string; type: string };
+  source: { userId: string; groupId?: string; type: string };
   message: { type: 'text'; id: string; text: string };
 }
-
 interface LinePostbackEvent {
   type: 'postback';
   replyToken: string;
-  source: { userId: string; type: string };
+  source: { userId: string; groupId?: string; type: string };
   postback: { data: string };
 }
-
 interface LineFollowEvent {
   type: 'follow';
   replyToken: string;
   source: { userId: string };
 }
-
 type LineEvent = LineTextMessage | LinePostbackEvent | LineFollowEvent;
 
-async function resolveStaff(lineUserId: string) {
+// ─── ヘルパー ─────────────────────────────────────────────────
+async function getStaffAndFacility(lineUserId: string) {
   const supabase = createServiceClient();
-  const { data } = await supabase
+  const { data: staff } = await supabase
     .from('staff')
     .select('*')
     .eq('line_user_id', lineUserId)
     .single();
-  return data;
+  const facilityId =
+    staff?.facility_id ??
+    (await supabase.from('facilities').select('id').limit(1).single()).data?.id ?? null;
+  return { staff, facilityId };
 }
 
-async function getDefaultFacilityId(): Promise<string | null> {
-  const supabase = createServiceClient();
-  const { data } = await supabase.from('facilities').select('id').limit(1).single();
-  return data?.id ?? null;
-}
-
-async function handleTextMessage(event: LineTextMessage) {
-  const { replyToken, source, message } = event;
-  const lineUserId = source.userId;
-  const text = message.text;
-
-  // 10文字未満は無視
-  if (text.length < 10) return;
-
-  // コマンド判定
-  if (text === '未確定' || text === '申し送り') {
-    await replyWithFallback(replyToken, lineUserId, {
-      type: 'text',
-      text: '管理画面からご確認ください。',
-    });
-    return;
-  }
-
-  const supabase = createServiceClient();
-
-  // スタッフ・施設特定
-  const staff = await resolveStaff(lineUserId);
-  const facilityId = staff?.facility_id ?? (await getDefaultFacilityId());
-  if (!facilityId) {
-    await replyWithFallback(replyToken, lineUserId, {
-      type: 'text',
-      text: 'システムエラーが発生しました。管理者にお問い合わせください。',
-    });
-    return;
-  }
-
-  // LINEプロファイル取得（名前）
-  let displayName = staff?.name ?? null;
+async function getDisplayName(
+  lineUserId: string,
+  groupId: string | undefined,
+  staffName: string | null,
+): Promise<string> {
+  if (staffName) return staffName;
   try {
     const client = getLineClient();
-    const profile = await client.getProfile(lineUserId);
-    displayName = displayName ?? profile.displayName;
+    if (groupId) {
+      const profile = await client.getGroupMemberProfile(groupId, lineUserId);
+      return profile.displayName;
+    } else {
+      const profile = await client.getProfile(lineUserId);
+      return profile.displayName;
+    }
   } catch {
-    // プロファイル取得失敗は無視
+    return '不明';
   }
+}
 
-  // AI構造化処理（5段階スコア含む）
-  const parseResult = await parseRecord(text, facilityId).catch(() => ({
-    patient_name_in_text: null,
-    patient_candidates: [],
-    care_tags: [],
-    meal: null,
-    health: null,
-    excretion: null,
-    hydration: null,
-    condition: null,
-    condition_detail: null,
-    confidence: 0,
-    is_incident: false,
-    incident_keywords: [],
-    parse_notes: null,
-    comment: null,
-    ai_raw_output: {},
-  }));
+/** 利用者名テキストからDB検索（部分一致・かな一致） */
+async function findPatient(text: string, facilityId: string) {
+  const supabase = createServiceClient();
+  const query = text.trim().replace(/さん|様|くん|ちゃん$/g, '');
+  const { data } = await supabase
+    .from('patients')
+    .select('*')
+    .eq('facility_id', facilityId)
+    .eq('is_active', true)
+    .ilike('name', `%${query}%`)
+    .limit(1);
+  return data?.[0] ?? null;
+}
 
-  // draft保存
-  const { data: record, error } = await supabase
+/** 利用者の最新確定記録を取得 */
+async function getLastRecord(patientId: string, facilityId: string) {
+  const supabase = createServiceClient();
+  const { data } = await supabase
+    .from('records')
+    .select('meal,health,excretion,hydration,care_tags')
+    .eq('patient_id', patientId)
+    .eq('facility_id', facilityId)
+    .eq('status', 'confirmed')
+    .order('recorded_at', { ascending: false })
+    .limit(1);
+  return data?.[0] ?? null;
+}
+
+/** draft レコードを作成して ID を返す */
+async function createDraftRecord(params: {
+  facilityId: string;
+  staffId: string | null;
+  patientId: string;
+  lineUserId: string;
+  displayName: string;
+  meal: MealScore;
+  health: HealthScore;
+  excretion: ExcretionScore;
+  hydration: HydrationScore;
+}) {
+  const supabase = createServiceClient();
+  const { data, error } = await supabase
     .from('records')
     .insert({
-      facility_id: facilityId,
+      facility_id: params.facilityId,
+      patient_id: params.patientId,
+      staff_id: params.staffId,
+      line_user_id: params.lineUserId,
+      line_display_name: params.displayName,
       status: 'draft',
-      staff_id: staff?.id ?? null,
-      line_user_id: lineUserId,
-      line_display_name: displayName,
-      patient_id: null,
-      patient_candidates: parseResult.patient_candidates,
-      care_tags: parseResult.care_tags,
-      meal: parseResult.meal ?? null,
-      health: parseResult.health ?? null,
-      excretion: parseResult.excretion ?? null,
-      hydration: parseResult.hydration ?? null,
-      condition: parseResult.condition,
-      condition_detail: parseResult.condition_detail,
-      original_text: text,
-      confidence: parseResult.confidence,
-      ai_raw_output: parseResult.ai_raw_output,
-      is_incident: parseResult.is_incident,
-      incident_keywords: parseResult.incident_keywords,
-      line_message_id: message.id,
+      meal: params.meal,
+      health: params.health,
+      excretion: params.excretion,
+      hydration: params.hydration,
+      care_tags: [],
       recorded_at: new Date().toISOString(),
     })
     .select()
     .single();
+  if (error) throw error;
+  return data;
+}
 
-  if (error || !record) {
-    console.error('[DB insert error]', error);
+// ─── メッセージ処理 ───────────────────────────────────────────
+async function handleTextMessage(event: LineTextMessage) {
+  const { replyToken, source, message } = event;
+  const lineUserId = source.userId;
+  const groupId = source.groupId;
+  const text = message.text.trim();
+
+  // 空・コマンド系は無視
+  if (!text || text === '未確定' || text === '申し送り') return;
+
+  const { staff, facilityId } = await getStaffAndFacility(lineUserId);
+  if (!facilityId) {
     await replyWithFallback(replyToken, lineUserId, {
       type: 'text',
-      text: '記録の保存に失敗しました。もう一度お試しください。',
+      text: 'システムエラー: 施設情報が見つかりません。管理者にお問い合わせください。',
     });
     return;
   }
 
-  // Flex Message送信（5スコア入り）
-  const flex = buildConfirmFlex(record as CareRecord);
-  await replyWithFallback(replyToken, lineUserId, flex as unknown as Parameters<typeof replyWithFallback>[2]);
+  const displayName = await getDisplayName(lineUserId, groupId, staff?.name ?? null);
+
+  // 利用者名マッチング（20文字以内なら検索）
+  if (text.length <= 20) {
+    const patient = await findPatient(text, facilityId);
+    if (patient) {
+      // 前回記録をコピー or デフォルト
+      const last = await getLastRecord(patient.id, facilityId);
+      const meal      = (last?.meal      as MealScore)      ?? DEFAULT_MEAL;
+      const health    = (last?.health    as HealthScore)    ?? DEFAULT_HEALTH;
+      const excretion = (last?.excretion as ExcretionScore) ?? DEFAULT_EXCRETION;
+      const hydration = (last?.hydration as HydrationScore) ?? DEFAULT_HYDRATION;
+
+      const draft = await createDraftRecord({
+        facilityId,
+        staffId:     staff?.id ?? null,
+        patientId:   patient.id,
+        lineUserId,
+        displayName,
+        meal, health, excretion, hydration,
+      }).catch(() => null);
+
+      if (!draft) {
+        await replyWithFallback(replyToken, lineUserId, {
+          type: 'text',
+          text: '記録の作成に失敗しました。もう一度お試しください。',
+        });
+        return;
+      }
+
+      const formState: ScoreFormState = {
+        recordId:       draft.id,
+        patientName:    patient.name,
+        staffName:      displayName,
+        meal, health, excretion, hydration,
+        isFromPrevious: !!last,
+      };
+      const flex = buildScoreFormFlex(formState);
+      await replyWithFallback(
+        replyToken,
+        lineUserId,
+        flex as unknown as Parameters<typeof replyWithFallback>[2],
+      );
+      return;
+    }
+  }
+
+  // 利用者名が見つからない場合
+  const supabase = createServiceClient();
+  const { data: patients } = await supabase
+    .from('patients')
+    .select('name')
+    .eq('facility_id', facilityId)
+    .eq('is_active', true)
+    .order('name')
+    .limit(10);
+  const nameList = (patients ?? []).map((p) => `・${p.name}`).join('\n');
+
+  await replyWithFallback(replyToken, lineUserId, {
+    type: 'text',
+    text: `利用者名が見つかりませんでした。\n以下の名前（または一部）を送ってください:\n\n${nameList}`,
+  });
 }
 
+// ─── ポストバック処理 ─────────────────────────────────────────
 async function handlePostback(event: LinePostbackEvent) {
   const { replyToken, source, postback } = event;
   const lineUserId = source.userId;
+  const groupId = source.groupId;
 
   let data: Record<string, unknown>;
   try {
@@ -161,116 +239,103 @@ async function handlePostback(event: LinePostbackEvent) {
     return;
   }
 
+  const action   = data.a as string;
+  const recordId = data.r as string;
+  if (!recordId) return;
+
   const supabase = createServiceClient();
-  const action = data.action as string;
-  const recordId = data.record_id as string;
 
-  switch (action) {
-    case 'confirm': {
-      const patientId = data.patient_id as string | null;
-      await supabase
-        .from('records')
-        .update({
-          status: 'confirmed',
-          patient_id: patientId,
-          confirmed_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', recordId);
-      await replyWithFallback(replyToken, lineUserId, {
-        type: 'text',
-        text: '✅ 記録を確定しました。',
-      });
-      break;
-    }
+  // ── スコアボタンタップ: フォーム再描画 ──
+  if (action === 'ss') {
+    const field = data.f as string;
+    const value = data.v as string;
 
-    case 'edit_open': {
-      const flex = buildEditMenuFlex(recordId);
-      await replyWithFallback(replyToken, lineUserId, flex as unknown as Parameters<typeof replyWithFallback>[2]);
-      break;
-    }
+    // DB更新
+    await supabase
+      .from('records')
+      .update({ [field]: value, updated_at: new Date().toISOString() })
+      .eq('id', recordId);
 
-    case 'edit_patient': {
-      const { data: facilityData } = await supabase
-        .from('records')
-        .select('facility_id')
-        .eq('id', recordId)
-        .single();
-      const facilityId = facilityData?.facility_id as string;
-      const { data: patients } = await supabase
-        .from('patients')
-        .select('*')
-        .eq('facility_id', facilityId)
-        .eq('is_active', true)
-        .order('name');
-      const flex = buildPatientSelectFlex(recordId, (patients ?? []) as Patient[]);
-      await replyWithFallback(replyToken, lineUserId, flex as unknown as Parameters<typeof replyWithFallback>[2]);
-      break;
-    }
+    // 最新状態を取得してフォーム再描画
+    const { data: rec } = await supabase
+      .from('records')
+      .select('*, patient:patients(name), staff:staff(name)')
+      .eq('id', recordId)
+      .single();
+    if (!rec) return;
 
-    case 'edit_patient_confirm': {
-      const patientId = data.patient_id as string;
-      await supabase
-        .from('records')
-        .update({ patient_id: patientId, updated_at: new Date().toISOString() })
-        .eq('id', recordId);
-      const { data: updated } = await supabase
-        .from('records')
-        .select('*')
-        .eq('id', recordId)
-        .single();
-      if (updated) {
-        const flex = buildConfirmFlex(updated as CareRecord);
-        await replyWithFallback(replyToken, lineUserId, flex as unknown as Parameters<typeof replyWithFallback>[2]);
-      }
-      break;
-    }
+    const { staff } = await getStaffAndFacility(lineUserId);
+    const displayName = await getDisplayName(lineUserId, groupId, (rec as Record<string,unknown> & {staff?: {name?:string}})?.staff?.name ?? staff?.name ?? null);
 
-    case 'edit_condition': {
-      const flex = buildConditionSelectFlex(recordId);
-      await replyWithFallback(replyToken, lineUserId, flex as unknown as Parameters<typeof replyWithFallback>[2]);
-      break;
-    }
+    const formState: ScoreFormState = {
+      recordId,
+      patientName:    (rec as Record<string,unknown> & {patient?: {name?:string}})?.patient?.name ?? '不明',
+      staffName:      displayName,
+      meal:      (rec.meal      ?? DEFAULT_MEAL)      as MealScore,
+      health:    (rec.health    ?? DEFAULT_HEALTH)    as HealthScore,
+      excretion: (rec.excretion ?? DEFAULT_EXCRETION) as ExcretionScore,
+      hydration: (rec.hydration ?? DEFAULT_HYDRATION) as HydrationScore,
+      isFromPrevious: false,
+    };
+    const flex = buildScoreFormFlex(formState);
+    await replyWithFallback(
+      replyToken,
+      lineUserId,
+      flex as unknown as Parameters<typeof replyWithFallback>[2],
+    );
+    return;
+  }
 
-    case 'edit_condition_confirm': {
-      const condition = data.condition as string;
-      await supabase
-        .from('records')
-        .update({ condition, updated_at: new Date().toISOString() })
-        .eq('id', recordId);
-      const { data: updated } = await supabase
-        .from('records')
-        .select('*')
-        .eq('id', recordId)
-        .single();
-      if (updated) {
-        const flex = buildConfirmFlex(updated as CareRecord);
-        await replyWithFallback(replyToken, lineUserId, flex as unknown as Parameters<typeof replyWithFallback>[2]);
-      }
-      break;
-    }
+  // ── 記録する（確定） ──
+  if (action === 'sr') {
+    const { data: rec } = await supabase
+      .from('records')
+      .select('*, patient:patients(name)')
+      .eq('id', recordId)
+      .single();
+    if (!rec) return;
+
+    await supabase
+      .from('records')
+      .update({
+        status:       'confirmed',
+        confirmed_at: new Date().toISOString(),
+        updated_at:   new Date().toISOString(),
+      })
+      .eq('id', recordId);
+
+    const patientName = (rec as Record<string,unknown> & {patient?: {name?:string}})?.patient?.name ?? '利用者';
+    const scores = [
+      `🍽 食事: ${rec.meal ?? '－'}`,
+      `💊 健康: ${rec.health ?? '－'}`,
+      `🚽 排泄: ${rec.excretion ?? '－'}`,
+      `💧 水分: ${rec.hydration ?? '－'}`,
+    ].join('\n');
+
+    await replyWithFallback(replyToken, lineUserId, {
+      type: 'text',
+      text: `✅ ${patientName}さんの記録を保存しました\n\n${scores}`,
+    });
   }
 }
 
+// ─── フォロー ─────────────────────────────────────────────────
 async function handleFollow(event: LineFollowEvent) {
   const { replyToken, source } = event;
   await replyWithFallback(replyToken, source.userId, {
     type: 'text',
-    text: 'えんがおサポートへようこそ！\n\nLINEグループに介護記録を投稿するだけで自動整理します。\n\n例）\n「小高さん 食事8割 体調良好 排泄正常 水分普通 特変なし」\n\nAIが内容を読み取り、確認メッセージをお送りします。',
+    text: 'えんがおサポートへようこそ！\n\nLINEグループに利用者名を送るだけで記録フォームが開きます。\n\n例）「田中」「小高さん」\n\n日時・担当名は自動取得します。変化があった部分だけボタンで変更してください。',
   });
 }
 
+// ─── POST エントリポイント ────────────────────────────────────
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const signature = request.headers.get('x-line-signature');
-  if (!signature) {
-    return new NextResponse('Missing signature', { status: 401 });
-  }
+  if (!signature) return new NextResponse('Missing signature', { status: 401 });
 
   const body = await request.text();
   const isValid = verifyLineSignature(body, signature, process.env.LINE_CHANNEL_SECRET ?? '');
-  if (!isValid) {
-    return new NextResponse('Invalid signature', { status: 401 });
-  }
+  if (!isValid) return new NextResponse('Invalid signature', { status: 401 });
 
   let payload: { events: LineEvent[] };
   try {
@@ -289,7 +354,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         await handleFollow(event as LineFollowEvent);
       }
     } catch (err) {
-      console.error('[Event handling error]', err);
+      console.error('[Webhook error]', err);
     }
   }
 
