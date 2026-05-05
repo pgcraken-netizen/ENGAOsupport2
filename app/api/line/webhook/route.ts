@@ -162,11 +162,16 @@ async function handleTextMessage(event: LineTextMessage) {
   const groupId = source.groupId;
   const text = message.text.trim();
 
+  console.log('[webhook] text received:', JSON.stringify({ text, lineUserId, groupId }));
+
   // 空・コマンド系は無視
   if (!text || text === '未確定' || text === '申し送り') return;
 
   const { staff, facilityId } = await getStaffAndFacility(lineUserId);
+  console.log('[webhook] staff:', staff?.id ?? 'null', 'facilityId:', facilityId ?? 'null');
+
   if (!facilityId) {
+    console.error('[webhook] facilityId not found');
     await replyWithFallback(replyToken, lineUserId, {
       type: 'text',
       text: 'システムエラー: 施設情報が見つかりません。管理者にお問い合わせください。',
@@ -179,6 +184,7 @@ async function handleTextMessage(event: LineTextMessage) {
   // 利用者名マッチング（20文字以内なら検索）
   if (text.length <= 20) {
     const result = await findPatient(text, facilityId);
+    console.log('[webhook] findPatient result:', result ? result.patient.name : 'null');
     if (result) {
       const { patient } = result;
       // 前回記録をコピー or デフォルト
@@ -199,7 +205,7 @@ async function handleTextMessage(event: LineTextMessage) {
         displayName,
         originalText: comment || `${patient.name} フォーム入力`,
         meal, health, excretion, hydration,
-      }).catch(() => null);
+      }).catch((e) => { console.error('[webhook] createDraft error:', e?.message ?? e); return null; });
 
       if (!draft) {
         await replyWithFallback(replyToken, lineUserId, {
