@@ -14,7 +14,7 @@ export async function GET(
       .select(`
         *,
         patient:patients(id, name, room_number, care_level),
-        staff:staff(id, name)
+        staff:staff!records_staff_id_fkey(id, name)
       `)
       .eq('id', params.id)
       .single();

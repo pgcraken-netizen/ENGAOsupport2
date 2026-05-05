@@ -276,7 +276,7 @@ async function handlePostback(event: LinePostbackEvent) {
     // 最新状態を取得してフォーム再描画
     const { data: rec } = await supabase
       .from('records')
-      .select('*, patient:patients(name), staff:staff(name)')
+      .select('*, patient:patients(name), staff:staff!records_staff_id_fkey(name)')
       .eq('id', recordId)
       .single();
     if (!rec) return;

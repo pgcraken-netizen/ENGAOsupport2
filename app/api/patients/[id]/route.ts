@@ -24,7 +24,7 @@ export async function GET(
     if (includeRecords) {
       const { data } = await supabase
         .from('records')
-        .select('*, staff:staff(id, name)')
+        .select('*, staff:staff!records_staff_id_fkey(id, name)')
         .eq('patient_id', params.id)
         .eq('status', 'confirmed')
         .order('recorded_at', { ascending: false })

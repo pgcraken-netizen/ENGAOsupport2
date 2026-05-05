@@ -14,7 +14,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       .select(`
         *,
         patient:patients(id, name, room_number),
-        staff:staff(id, name)
+        staff:staff!records_staff_id_fkey(id, name)
       `)
       .eq('status', 'draft')
       .order('recorded_at', { ascending: false });

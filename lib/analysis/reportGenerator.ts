@@ -19,7 +19,7 @@ export async function generateDailyReport(facilityId: string, reportDate: string
     .select(`
       *,
       patient:patients(id, name, room_number),
-      staff:staff(id, name)
+      staff:staff!records_staff_id_fkey(id, name)
     `)
     .eq('facility_id', facilityId)
     .eq('status', 'confirmed')
