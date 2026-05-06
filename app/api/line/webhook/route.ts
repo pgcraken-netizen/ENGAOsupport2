@@ -32,6 +32,7 @@ interface LineTextMessage {
   replyToken: string;
   source: { userId: string; groupId?: string; type: string };
   message: { type: 'text'; id: string; text: string };
+  webhookEventId?: string;  // LINE固有イベントID
 }
 interface LinePostbackEvent {
   type: 'postback';
@@ -162,7 +163,8 @@ async function handleTextMessage(event: LineTextMessage) {
   const groupId = source.groupId;
   const text = message.text.trim();
 
-  console.log('[webhook] text received:', JSON.stringify({ text, lineUserId, groupId }));
+  const lineMessageId = message.id;  // LINEメッセージ固有ID
+  console.log('[webhook] text received:', JSON.stringify({ text, lineUserId, groupId, lineMessageId }));
 
   // 空・コマンド系は無視
   if (!text || text === '未確定' || text === '申し送り') return;
@@ -173,6 +175,24 @@ async function handleTextMessage(event: LineTextMessage) {
     console.log('[webhook] skipping bot own message (loop prevention)');
     return;
   }
+
+  // ── LINEメッセージIDで重複除去 ────────────────────────────────
+  // LINEはwebhookが5秒以内に返らないとリトライするため同一メッセージが複数回届く場合がある
+  // original_text に "line_msg:<id>" を保存し、重複チェックに使用（スキーマ変更不要）
+  {
+    const supabaseDedup = createServiceClient();
+    const sentinelKey = `line_msg:${lineMessageId}`;
+    const { data: dup } = await supabaseDedup
+      .from('records')
+      .select('id')
+      .eq('original_text', sentinelKey)
+      .maybeSingle();
+    if (dup) {
+      console.log('[webhook] duplicate LINE message, skipping:', lineMessageId);
+      return;
+    }
+  }
+  // ────────────────────────────────────────────────────────────────
 
   const { staff, facilityId } = await getStaffAndFacility(lineUserId);
   console.log('[webhook] staff:', staff?.id ?? 'null', 'facilityId:', facilityId ?? 'null');
@@ -227,6 +247,8 @@ async function handleTextMessage(event: LineTextMessage) {
         health    = (existingDraft.health    as HealthScore)    ?? health;
         excretion = (existingDraft.excretion as ExcretionScore) ?? excretion;
         hydration = (existingDraft.hydration as HydrationScore) ?? hydration;
+        // 既存ドラフトがある = すでにreplyMessage済み → pushMessageフォールバックは使わない
+        // （LINEリトライで二重送信しないために replyMessage のみ試行）
       }
 
       console.log('[webhook] creating draft... facilityId:', facilityId, 'patientId:', patient.id);
@@ -236,7 +258,7 @@ async function handleTextMessage(event: LineTextMessage) {
         patientId:    patient.id,
         lineUserId,
         displayName,
-        originalText: comment || `${patient.name} フォーム入力`,
+        originalText: `line_msg:${lineMessageId}`,  // 重複防止キー兼originalText
         meal, health, excretion, hydration,
       }).catch((e) => { console.error('[webhook] createDraft error:', e?.message ?? e, JSON.stringify(e)); return null; });
 
@@ -272,25 +294,31 @@ async function handleTextMessage(event: LineTextMessage) {
         return;
       }
 
-      console.log('[webhook] sending reply... replyToken prefix:', replyToken?.substring(0, 8), 'groupId:', groupId ?? 'none');
+      const isNewDraft = !existingDraft;
+      console.log('[webhook] sending reply... replyToken prefix:', replyToken?.substring(0, 8), 'groupId:', groupId ?? 'none', 'isNewDraft:', isNewDraft);
       try {
         await replyWithFallback(
           replyToken,
           lineUserId,
           flex as unknown as Parameters<typeof replyWithFallback>[2],
-          groupId,   // グループへフォールバック送信
+          isNewDraft ? groupId : undefined,  // 新規ドラフトのみgroupIdフォールバック使用（再利用時は二重送信防止）
         );
         console.log('[webhook] reply sent successfully');
       } catch (re) {
-        console.error('[webhook] replyWithFallback error:', re);
-        try {
-          await replyWithFallback(replyToken, lineUserId, {
-            type: 'text',
-            text: `📋 ${patient.name}さん\n食事:${meal} 健康:${health} 排泄:${excretion} 水分:${hydration}\n（送信エラーのためテキスト表示）`,
-          }, groupId);
-          console.log('[webhook] text fallback sent');
-        } catch (te) {
-          console.error('[webhook] text fallback also failed:', te);
+        if (isNewDraft) {
+          // 新規ドラフトの場合のみテキストフォールバック
+          console.error('[webhook] replyWithFallback error:', re);
+          try {
+            await replyWithFallback(replyToken, lineUserId, {
+              type: 'text',
+              text: `📋 ${patient.name}さん\n食事:${meal} 健康:${health} 排泄:${excretion} 水分:${hydration}\n（送信エラーのためテキスト表示）`,
+            }, groupId);
+            console.log('[webhook] text fallback sent');
+          } catch (te) {
+            console.error('[webhook] text fallback also failed:', te);
+          }
+        } else {
+          console.log('[webhook] reply for existing draft failed (likely duplicate webhook), suppressed');
         }
       }
       return;
