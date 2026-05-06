@@ -167,6 +167,13 @@ async function handleTextMessage(event: LineTextMessage) {
   // 空・コマンド系は無視
   if (!text || text === '未確定' || text === '申し送り') return;
 
+  // ボット自身の返信パターンを除外（グループpushMessageのエコーによる無限ループ防止）
+  const BOT_REPLY_PREFIXES = ['📋', '✅', '利用者名が見つかりませんでした', 'システムエラー', '記録の作成に失敗'];
+  if (BOT_REPLY_PREFIXES.some(p => text.startsWith(p))) {
+    console.log('[webhook] skipping bot own message (loop prevention)');
+    return;
+  }
+
   const { staff, facilityId } = await getStaffAndFacility(lineUserId);
   console.log('[webhook] staff:', staff?.id ?? 'null', 'facilityId:', facilityId ?? 'null');
 
@@ -192,16 +199,38 @@ async function handleTextMessage(event: LineTextMessage) {
       const last = await getLastRecord(patient.id, facilityId);
       console.log('[webhook] last record:', last ? JSON.stringify(last) : 'null');
 
-      const meal      = (last?.meal      as MealScore)      ?? DEFAULT_MEAL;
-      const health    = (last?.health    as HealthScore)    ?? DEFAULT_HEALTH;
-      const excretion = (last?.excretion as ExcretionScore) ?? DEFAULT_EXCRETION;
-      const hydration = (last?.hydration as HydrationScore) ?? DEFAULT_HYDRATION;
+      let meal      = (last?.meal      as MealScore)      ?? DEFAULT_MEAL;
+      let health    = (last?.health    as HealthScore)    ?? DEFAULT_HEALTH;
+      let excretion = (last?.excretion as ExcretionScore) ?? DEFAULT_EXCRETION;
+      let hydration = (last?.hydration as HydrationScore) ?? DEFAULT_HYDRATION;
       // 名前以外の部分をコメントとして保持
       const tokens = text.split(/[\s　]+/);
       const comment = tokens.filter(t => !t.includes(result.matchedToken.replace(/さん|様|くん|ちゃん$/, ''))).join(' ');
 
+      // 直近5分以内に同一ユーザー・同一利用者のドラフトがあれば再利用（重複作成防止）
+      const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      const { data: existingDraft } = await createServiceClient()
+        .from('records')
+        .select('id, meal, health, excretion, hydration')
+        .eq('patient_id', patient.id)
+        .eq('line_user_id', lineUserId)
+        .eq('status', 'draft')
+        .gte('created_at', fiveMinAgo)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (existingDraft) {
+        console.log('[webhook] reusing existing draft:', existingDraft.id);
+        // 既存ドラフトのスコアを上書き（最新の前回コピーを反映）
+        meal      = (existingDraft.meal      as MealScore)      ?? meal;
+        health    = (existingDraft.health    as HealthScore)    ?? health;
+        excretion = (existingDraft.excretion as ExcretionScore) ?? excretion;
+        hydration = (existingDraft.hydration as HydrationScore) ?? hydration;
+      }
+
       console.log('[webhook] creating draft... facilityId:', facilityId, 'patientId:', patient.id);
-      const draft = await createDraftRecord({
+      const draft = existingDraft ?? await createDraftRecord({
         facilityId,
         staffId:      staff?.id ?? null,
         patientId:    patient.id,
@@ -404,19 +433,23 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return new NextResponse('Invalid JSON', { status: 400 });
   }
 
-  for (const event of payload.events ?? []) {
-    try {
-      if (event.type === 'message' && (event as LineTextMessage).message?.type === 'text') {
-        await handleTextMessage(event as LineTextMessage);
-      } else if (event.type === 'postback') {
-        await handlePostback(event as LinePostbackEvent);
-      } else if (event.type === 'follow') {
-        await handleFollow(event as LineFollowEvent);
+  // 200を即座に返してLINEのリトライを防ぐ（処理は非同期で継続）
+  const processAll = async () => {
+    for (const event of payload.events ?? []) {
+      try {
+        if (event.type === 'message' && (event as LineTextMessage).message?.type === 'text') {
+          await handleTextMessage(event as LineTextMessage);
+        } else if (event.type === 'postback') {
+          await handlePostback(event as LinePostbackEvent);
+        } else if (event.type === 'follow') {
+          await handleFollow(event as LineFollowEvent);
+        }
+      } catch (err) {
+        console.error('[Webhook error]', err);
       }
-    } catch (err) {
-      console.error('[Webhook error]', err);
     }
-  }
+  };
+  processAll().catch(err => console.error('[Webhook fatal]', err));
 
   return new NextResponse('OK', { status: 200 });
 }
