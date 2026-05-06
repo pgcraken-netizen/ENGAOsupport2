@@ -50,7 +50,7 @@ function scoreBtn(
   return {
     type: 'button',
     style: isSelected ? 'primary' : 'secondary',
-    color: isSelected ? color : undefined,
+    ...(isSelected ? { color } : {}),   // 未選択はcolorを省略（secondaryのデフォルト色を使用）
     height: 'sm',
     action: {
       type: 'postback',
@@ -58,7 +58,7 @@ function scoreBtn(
       data: JSON.stringify({ a: 'ss', r: recordId, f: field, v: value }),
     },
     flex: 1,
-    paddingAll: 'xs',
+    margin: 'xs',                        // paddingAll(無効) → margin(有効)に変更
   };
 }
 

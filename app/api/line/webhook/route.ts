@@ -217,7 +217,7 @@ async function handleTextMessage(event: LineTextMessage) {
         await replyWithFallback(replyToken, lineUserId, {
           type: 'text',
           text: '記録の作成に失敗しました。もう一度お試しください。',
-        });
+        }, groupId);
         return;
       }
 
@@ -239,16 +239,17 @@ async function handleTextMessage(event: LineTextMessage) {
         await replyWithFallback(replyToken, lineUserId, {
           type: 'text',
           text: `📋 ${patient.name}さん\n食事:${meal} 健康:${health} 排泄:${excretion} 水分:${hydration}\n（フォームエラーのためテキスト表示）`,
-        });
+        }, groupId);
         return;
       }
 
-      console.log('[webhook] sending reply... replyToken prefix:', replyToken?.substring(0, 8));
+      console.log('[webhook] sending reply... replyToken prefix:', replyToken?.substring(0, 8), 'groupId:', groupId ?? 'none');
       try {
         await replyWithFallback(
           replyToken,
           lineUserId,
           flex as unknown as Parameters<typeof replyWithFallback>[2],
+          groupId,   // グループへフォールバック送信
         );
         console.log('[webhook] reply sent successfully');
       } catch (re) {
@@ -257,7 +258,7 @@ async function handleTextMessage(event: LineTextMessage) {
           await replyWithFallback(replyToken, lineUserId, {
             type: 'text',
             text: `📋 ${patient.name}さん\n食事:${meal} 健康:${health} 排泄:${excretion} 水分:${hydration}\n（送信エラーのためテキスト表示）`,
-          });
+          }, groupId);
           console.log('[webhook] text fallback sent');
         } catch (te) {
           console.error('[webhook] text fallback also failed:', te);
@@ -281,7 +282,7 @@ async function handleTextMessage(event: LineTextMessage) {
   await replyWithFallback(replyToken, lineUserId, {
     type: 'text',
     text: `利用者名が見つかりませんでした。\n以下の名前（または一部）を送ってください:\n\n${nameList}`,
-  });
+  }, groupId);
 }
 
 // ─── ポストバック処理 ─────────────────────────────────────────
@@ -340,6 +341,7 @@ async function handlePostback(event: LinePostbackEvent) {
       replyToken,
       lineUserId,
       flex as unknown as Parameters<typeof replyWithFallback>[2],
+      groupId,
     );
     return;
   }
@@ -373,7 +375,7 @@ async function handlePostback(event: LinePostbackEvent) {
     await replyWithFallback(replyToken, lineUserId, {
       type: 'text',
       text: `✅ ${patientName}さんの記録を保存しました\n\n${scores}`,
-    });
+    }, groupId);
   }
 }
 
