@@ -433,23 +433,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return new NextResponse('Invalid JSON', { status: 400 });
   }
 
-  // 200を即座に返してLINEのリトライを防ぐ（処理は非同期で継続）
-  const processAll = async () => {
-    for (const event of payload.events ?? []) {
-      try {
-        if (event.type === 'message' && (event as LineTextMessage).message?.type === 'text') {
-          await handleTextMessage(event as LineTextMessage);
-        } else if (event.type === 'postback') {
-          await handlePostback(event as LinePostbackEvent);
-        } else if (event.type === 'follow') {
-          await handleFollow(event as LineFollowEvent);
-        }
-      } catch (err) {
-        console.error('[Webhook error]', err);
+  // イベントを順次処理（awaitで確実に実行）
+  // Vercelサーバーレスではfire-and-forgetは関数終了で打ち切られるため同期処理が安全
+  for (const event of payload.events ?? []) {
+    try {
+      if (event.type === 'message' && (event as LineTextMessage).message?.type === 'text') {
+        await handleTextMessage(event as LineTextMessage);
+      } else if (event.type === 'postback') {
+        await handlePostback(event as LinePostbackEvent);
+      } else if (event.type === 'follow') {
+        await handleFollow(event as LineFollowEvent);
       }
+    } catch (err) {
+      console.error('[Webhook error]', err);
     }
-  };
-  processAll().catch(err => console.error('[Webhook fatal]', err));
+  }
 
   return new NextResponse('OK', { status: 200 });
 }
