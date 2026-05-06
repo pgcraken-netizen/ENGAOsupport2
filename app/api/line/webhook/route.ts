@@ -188,7 +188,10 @@ async function handleTextMessage(event: LineTextMessage) {
     if (result) {
       const { patient } = result;
       // 前回記録をコピー or デフォルト
+      console.log('[webhook] getLastRecord for patientId:', patient.id);
       const last = await getLastRecord(patient.id, facilityId);
+      console.log('[webhook] last record:', last ? JSON.stringify(last) : 'null');
+
       const meal      = (last?.meal      as MealScore)      ?? DEFAULT_MEAL;
       const health    = (last?.health    as HealthScore)    ?? DEFAULT_HEALTH;
       const excretion = (last?.excretion as ExcretionScore) ?? DEFAULT_EXCRETION;
@@ -197,6 +200,7 @@ async function handleTextMessage(event: LineTextMessage) {
       const tokens = text.split(/[\s　]+/);
       const comment = tokens.filter(t => !t.includes(result.matchedToken.replace(/さん|様|くん|ちゃん$/, ''))).join(' ');
 
+      console.log('[webhook] creating draft... facilityId:', facilityId, 'patientId:', patient.id);
       const draft = await createDraftRecord({
         facilityId,
         staffId:      staff?.id ?? null,
@@ -205,7 +209,9 @@ async function handleTextMessage(event: LineTextMessage) {
         displayName,
         originalText: comment || `${patient.name} フォーム入力`,
         meal, health, excretion, hydration,
-      }).catch((e) => { console.error('[webhook] createDraft error:', e?.message ?? e); return null; });
+      }).catch((e) => { console.error('[webhook] createDraft error:', e?.message ?? e, JSON.stringify(e)); return null; });
+
+      console.log('[webhook] draft result:', draft ? draft.id : 'null (failed)');
 
       if (!draft) {
         await replyWithFallback(replyToken, lineUserId, {
@@ -222,12 +228,41 @@ async function handleTextMessage(event: LineTextMessage) {
         meal, health, excretion, hydration,
         isFromPrevious: !!last,
       };
-      const flex = buildScoreFormFlex(formState);
-      await replyWithFallback(
-        replyToken,
-        lineUserId,
-        flex as unknown as Parameters<typeof replyWithFallback>[2],
-      );
+
+      console.log('[webhook] building flex message...');
+      let flex;
+      try {
+        flex = buildScoreFormFlex(formState);
+        console.log('[webhook] flex built, altText:', flex.altText);
+      } catch (fe) {
+        console.error('[webhook] buildScoreFormFlex error:', fe);
+        await replyWithFallback(replyToken, lineUserId, {
+          type: 'text',
+          text: `📋 ${patient.name}さん\n食事:${meal} 健康:${health} 排泄:${excretion} 水分:${hydration}\n（フォームエラーのためテキスト表示）`,
+        });
+        return;
+      }
+
+      console.log('[webhook] sending reply... replyToken prefix:', replyToken?.substring(0, 8));
+      try {
+        await replyWithFallback(
+          replyToken,
+          lineUserId,
+          flex as unknown as Parameters<typeof replyWithFallback>[2],
+        );
+        console.log('[webhook] reply sent successfully');
+      } catch (re) {
+        console.error('[webhook] replyWithFallback error:', re);
+        try {
+          await replyWithFallback(replyToken, lineUserId, {
+            type: 'text',
+            text: `📋 ${patient.name}さん\n食事:${meal} 健康:${health} 排泄:${excretion} 水分:${hydration}\n（送信エラーのためテキスト表示）`,
+          });
+          console.log('[webhook] text fallback sent');
+        } catch (te) {
+          console.error('[webhook] text fallback also failed:', te);
+        }
+      }
       return;
     }
   }
