@@ -11,7 +11,7 @@ import { useAlerts } from '@/hooks/useAlerts';
 import { useRealtimeRecords, useRealtimeAlerts } from '@/hooks/useRealtimeRecords';
 
 export default function DashboardPage() {
-  const { drafts, loading: draftsLoading, count: draftCount, confirmOne, refetch: refetchDrafts } = useDrafts();
+  const { drafts, loading: draftsLoading, count: draftCount, confirmOne, deleteOne, refetch: refetchDrafts } = useDrafts();
   const { alerts, loading: alertsLoading, criticalCount, resolveAlert, refetch: refetchAlerts } = useAlerts();
   const [showBulkModal, setShowBulkModal] = useState(false);
 
@@ -97,6 +97,7 @@ export default function DashboardPage() {
                   key={record.id}
                   record={record}
                   onConfirm={() => { confirmOne(record.id); }}
+                  onDelete={() => { if (confirm('この記録を削除しますか？')) deleteOne(record.id); }}
 
                 />
               ))}

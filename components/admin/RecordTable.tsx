@@ -5,12 +5,13 @@ import { CareRecord, MEAL_NEGATIVE, HEALTH_NEGATIVE, EXCRETION_NEGATIVE, HYDRATI
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { formatDateTime } from '@/lib/utils/dateUtils';
-import { CheckCircle, Edit2, ExternalLink } from 'lucide-react';
+import { CheckCircle, Edit2, ExternalLink, Trash2 } from 'lucide-react';
 
 interface RecordTableProps {
   records: CareRecord[];
   onConfirm?: (id: string) => void;
   onEdit?: (id: string) => void;
+  onDelete?: (id: string) => void;
 }
 
 const statusVariant: Record<string, 'default' | 'warning' | 'destructive'> = {
@@ -30,7 +31,7 @@ function ScorePill({ value, negatives }: { value: string | null | undefined; neg
   );
 }
 
-export function RecordTable({ records, onConfirm, onEdit }: RecordTableProps) {
+export function RecordTable({ records, onConfirm, onEdit, onDelete }: RecordTableProps) {
   if (records.length === 0) {
     return <div className="text-center py-16 text-gray-400 text-sm">記録がありません</div>;
   }
@@ -115,6 +116,16 @@ export function RecordTable({ records, onConfirm, onEdit }: RecordTableProps) {
                           </Button>
                         )}
                       </>
+                    )}
+                    {onDelete && (
+                      <Button
+                        size="sm" variant="ghost"
+                        className="h-7 w-7 p-0 text-red-400 hover:text-red-600 hover:bg-red-50"
+                        onClick={() => onDelete(record.id)}
+                        title="削除"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
                     )}
                   </div>
                 </td>

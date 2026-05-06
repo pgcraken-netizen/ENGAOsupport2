@@ -50,6 +50,16 @@ export function useDrafts(facilityId?: string) {
     await fetchDrafts();
   }, [drafts, fetchDrafts]);
 
+  const deleteOne = useCallback(async (id: string) => {
+    setDrafts(prev => prev.filter(r => r.id !== id));
+    try {
+      const res = await fetch(`/api/records/${id}`, { method: 'DELETE' });
+      if (!res.ok) await fetchDrafts();
+    } catch {
+      await fetchDrafts();
+    }
+  }, [fetchDrafts]);
+
   return {
     drafts,
     loading,
@@ -58,5 +68,6 @@ export function useDrafts(facilityId?: string) {
     refetch: fetchDrafts,
     confirmOne,
     confirmAll,
+    deleteOne,
   };
 }

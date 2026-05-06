@@ -59,5 +59,20 @@ export function useRecords(options: UseRecordsOptions = {}) {
     await fetchRecords();
   }, [fetchRecords]);
 
-  return { records, loading, error, refetch: fetchRecords, confirmRecord };
+  const deleteRecord = useCallback(async (id: string) => {
+    // 即座にUIから除去（楽観的更新）
+    setRecords(prev => prev.filter(r => r.id !== id));
+    try {
+      const res = await fetch(`/api/records/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        // 失敗したらリフレッシュして元に戻す
+        await fetchRecords();
+        throw new Error('削除に失敗しました');
+      }
+    } catch (err) {
+      console.error('[deleteRecord]', err);
+    }
+  }, [fetchRecords]);
+
+  return { records, loading, error, refetch: fetchRecords, confirmRecord, deleteRecord };
 }

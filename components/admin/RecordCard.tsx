@@ -4,12 +4,13 @@ import { CareRecord, MEAL_NEGATIVE, HEALTH_NEGATIVE, EXCRETION_NEGATIVE, HYDRATI
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { formatDateTime } from '@/lib/utils/dateUtils';
-import { CheckCircle, Edit2 } from 'lucide-react';
+import { CheckCircle, Edit2, Trash2 } from 'lucide-react';
 
 interface RecordCardProps {
   record: CareRecord;
   onConfirm?: (id: string) => void;
   onEdit?: (id: string) => void;
+  onDelete?: (id: string) => void;
   compact?: boolean;
 }
 
@@ -39,7 +40,7 @@ function ScoreCell({ label, value, negatives }: {
   );
 }
 
-export function RecordCard({ record, onConfirm, onEdit, compact = false }: RecordCardProps) {
+export function RecordCard({ record, onConfirm, onEdit, onDelete, compact = false }: RecordCardProps) {
   const patientName =
     record.patient?.name ??
     (record.patient_candidates as Array<{ name: string }>)?.[0]?.name ??
@@ -65,16 +66,25 @@ export function RecordCard({ record, onConfirm, onEdit, compact = false }: Recor
           </div>
           <p className="text-xs text-gray-500 mt-0.5">{formatDateTime(record.recorded_at)}</p>
         </div>
-        {!compact && record.status === 'draft' && (
+        {!compact && (
           <div className="flex gap-1.5 flex-shrink-0">
-            {onEdit && (
+            {record.status === 'draft' && onEdit && (
               <Button size="sm" variant="outline" onClick={() => onEdit(record.id)}>
                 <Edit2 className="h-3.5 w-3.5 mr-1" />修正
               </Button>
             )}
-            {onConfirm && (
+            {record.status === 'draft' && onConfirm && (
               <Button size="sm" onClick={() => onConfirm(record.id)}>
                 <CheckCircle className="h-3.5 w-3.5 mr-1" />確定
+              </Button>
+            )}
+            {onDelete && (
+              <Button
+                size="sm" variant="outline"
+                className="text-red-500 border-red-200 hover:bg-red-50 hover:text-red-700"
+                onClick={() => onDelete(record.id)}
+              >
+                <Trash2 className="h-3.5 w-3.5 mr-1" />削除
               </Button>
             )}
           </div>

@@ -15,7 +15,7 @@ export default function RecordsPage() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
 
-  const { records, loading, refetch, confirmRecord } = useRecords({
+  const { records, loading, refetch, confirmRecord, deleteRecord } = useRecords({
     status: statusFilter === 'all' ? undefined : statusFilter,
     dateFrom: dateFrom || undefined,
     dateTo: dateTo || undefined,
@@ -25,6 +25,13 @@ export default function RecordsPage() {
   const handleConfirm = (id: string) => {
     const record = records.find(r => r.id === id);
     confirmRecord(id, record?.patient_candidates?.[0]?.id);
+  };
+
+  const handleDelete = (id: string) => {
+    const record = records.find(r => r.id === id);
+    const name = record?.patient?.name ?? '記録';
+    if (!confirm(`「${name}」の記録を削除しますか？\nこの操作は取り消せません。`)) return;
+    deleteRecord(id);
   };
 
   return (
@@ -81,7 +88,7 @@ export default function RecordsPage() {
           <>
             {/* デスクトップ: テーブル表示 */}
             <div className="hidden md:block bg-white border border-gray-200 rounded-lg p-4">
-              <RecordTable records={records} onConfirm={handleConfirm} />
+              <RecordTable records={records} onConfirm={handleConfirm} onDelete={handleDelete} />
             </div>
 
             {/* モバイル: カード表示 */}
@@ -90,7 +97,7 @@ export default function RecordsPage() {
                 <div className="text-center py-12 text-gray-400 text-sm">記録がありません</div>
               ) : (
                 records.map(record => (
-                  <RecordCard key={record.id} record={record} onConfirm={handleConfirm} />
+                  <RecordCard key={record.id} record={record} onConfirm={handleConfirm} onDelete={handleDelete} />
                 ))
               )}
             </div>
