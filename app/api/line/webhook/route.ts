@@ -223,10 +223,6 @@ async function handleTextMessage(event: LineTextMessage) {
       let health    = (last?.health    as HealthScore)    ?? DEFAULT_HEALTH;
       let excretion = (last?.excretion as ExcretionScore) ?? DEFAULT_EXCRETION;
       let hydration = (last?.hydration as HydrationScore) ?? DEFAULT_HYDRATION;
-      // 名前以外の部分をコメントとして保持
-      const tokens = text.split(/[\s　]+/);
-      const comment = tokens.filter(t => !t.includes(result.matchedToken.replace(/さん|様|くん|ちゃん$/, ''))).join(' ');
-
       // 直近5分以内に同一ユーザー・同一利用者のドラフトがあれば再利用（重複作成防止）
       const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
       const { data: existingDraft } = await createServiceClient()
