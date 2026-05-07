@@ -1,13 +1,9 @@
 /**
  * LINE Webhook
  *
- * 記録フロー（LIFF方式）:
- *   LINEリッチメニュー「健康記録」→ LIFFページが開く
- *   → 利用者選択 → スコア入力 → 記録ボタン
- *
- * このWebhookの役割:
+ * 役割:
  *   - グループに利用者名が送られたら LIFFリンクボタンで返信
- *   - NEXT_PUBLIC_LIFF_ID が未設定の場合はフォールバックテキスト
+ *   - 受信時に facilities.line_group_id を自動保存（通知送信に使用）
  *   - フォロー時のウェルカムメッセージ
  */
 
@@ -18,28 +14,37 @@ import { replyWithFallback } from '@/lib/line/client';
 
 export const runtime = 'nodejs';
 
-// ── LINE イベント型 ──────────────────────────────────────────────
 interface TextMessageEvent {
   type: 'message';
   replyToken: string;
   source: { userId: string; groupId?: string; type: string };
   message: { type: 'text'; id: string; text: string };
 }
-interface PostbackEvent {
-  type: 'postback';
-  replyToken: string;
-  source: { userId: string; groupId?: string };
-  postback: { data: string };
-}
 interface FollowEvent {
   type: 'follow';
   replyToken: string;
   source: { userId: string };
 }
-type LineEvent = TextMessageEvent | PostbackEvent | FollowEvent;
+type LineEvent = TextMessageEvent | FollowEvent | { type: string };
+
+// ── グループIDを施設テーブルに保存 ───────────────────────────────
+async function saveGroupIdIfNeeded(facilityId: string, groupId: string) {
+  const supabase = createServiceClient();
+  const { data: facility } = await supabase
+    .from('facilities')
+    .select('line_group_id')
+    .eq('id', facilityId)
+    .single();
+  if (!facility?.line_group_id) {
+    await supabase
+      .from('facilities')
+      .update({ line_group_id: groupId })
+      .eq('id', facilityId);
+    console.log('[webhook] saved line_group_id:', groupId, 'for facility:', facilityId);
+  }
+}
 
 // ── ヘルパー ─────────────────────────────────────────────────────
-
 async function getFacilityId(lineUserId: string): Promise<string | null> {
   const supabase = createServiceClient();
   const { data: staff } = await supabase
@@ -70,9 +75,7 @@ async function findPatient(text: string, facilityId: string) {
   return null;
 }
 
-
-// ── LIFFリンクFlex（利用者名が一致した場合の返信） ─────────────
-
+// ── LIFFリンクFlex ────────────────────────────────────────────────
 function buildLiffLinkFlex(patientName: string, liffUrl: string) {
   return {
     type: 'flex',
@@ -85,60 +88,48 @@ function buildLiffLinkFlex(patientName: string, liffUrl: string) {
         layout: 'vertical',
         paddingAll: 'md',
         backgroundColor: '#6BA368',
-        contents: [
-          {
-            type: 'text',
-            text: `📋 ${patientName}さん`,
-            weight: 'bold',
-            size: 'md',
-            color: '#FFFFFF',
-          },
-        ],
+        contents: [{
+          type: 'text',
+          text: `📋 ${patientName}さん`,
+          weight: 'bold',
+          size: 'md',
+          color: '#FFFFFF',
+        }],
       },
       body: {
         type: 'box',
         layout: 'vertical',
         paddingAll: 'md',
-        contents: [
-          {
-            type: 'text',
-            text: '下のボタンから健康記録フォームを開いてください。',
-            size: 'sm',
-            color: '#555555',
-            wrap: true,
-          },
-        ],
+        contents: [{
+          type: 'text',
+          text: '下のボタンから健康記録フォームを開いてください。',
+          size: 'sm',
+          color: '#555555',
+          wrap: true,
+        }],
       },
       footer: {
         type: 'box',
         layout: 'vertical',
         paddingAll: 'md',
-        contents: [
-          {
-            type: 'button',
-            style: 'primary',
-            color: '#6BA368',
-            action: {
-              type: 'uri',
-              label: '記録フォームを開く',
-              uri: liffUrl,
-            },
-          },
-        ],
+        contents: [{
+          type: 'button',
+          style: 'primary',
+          color: '#6BA368',
+          action: { type: 'uri', label: '記録フォームを開く', uri: liffUrl },
+        }],
       },
     },
   };
 }
 
 // ── テキストメッセージ処理 ────────────────────────────────────────
-
 async function handleTextMessage(event: TextMessageEvent) {
   const { replyToken, source, message } = event;
   const lineUserId = source.userId;
   const groupId    = source.groupId;
   const text       = message.text.trim();
 
-  // ボット自身のメッセージ・コマンド系はスキップ
   if (!text || text.length > 20) return;
   const BOT_PREFIXES = ['📋', '✅', '⚠️', '利用者名が', 'システムエラー', '記録の作成', 'えんがおサポート'];
   if (BOT_PREFIXES.some(p => text.startsWith(p))) return;
@@ -146,22 +137,21 @@ async function handleTextMessage(event: TextMessageEvent) {
   const facilityId = await getFacilityId(lineUserId);
   if (!facilityId) return;
 
-  const patient = await findPatient(text, facilityId);
+  // グループIDを自動保存
+  if (groupId) await saveGroupIdIfNeeded(facilityId, groupId);
 
+  const patient = await findPatient(text, facilityId);
   const liffId  = process.env.NEXT_PUBLIC_LIFF_ID;
   const liffUrl = liffId ? `https://liff.line.me/${liffId}` : null;
 
   if (patient) {
     if (liffUrl) {
-      // ── LIFFが設定済み: リンクボタンで返信 ──
       await replyWithFallback(
-        replyToken,
-        lineUserId,
+        replyToken, lineUserId,
         buildLiffLinkFlex(patient.name, liffUrl) as unknown as Parameters<typeof replyWithFallback>[2],
         groupId,
       );
     } else {
-      // ── LIFFが未設定: テキストで案内 ──
       await replyWithFallback(replyToken, lineUserId, {
         type: 'text',
         text: `${patient.name}さんが見つかりました。\n管理者にLIFF IDの設定を依頼してください。`,
@@ -170,17 +160,13 @@ async function handleTextMessage(event: TextMessageEvent) {
     return;
   }
 
-  // 利用者が見つからない場合
-  if (!liffUrl) return;  // LIFF未設定時はスルー
+  if (!liffUrl) return;
 
   const supabase = createServiceClient();
   const { data: patients } = await supabase
-    .from('patients')
-    .select('name')
-    .eq('facility_id', facilityId)
-    .eq('is_active', true)
-    .order('name')
-    .limit(8);
+    .from('patients').select('name')
+    .eq('facility_id', facilityId).eq('is_active', true)
+    .order('name').limit(8);
   const list = (patients ?? []).map(p => `・${p.name}`).join('\n');
 
   await replyWithFallback(replyToken, lineUserId, {
@@ -190,20 +176,16 @@ async function handleTextMessage(event: TextMessageEvent) {
 }
 
 // ── フォロー処理 ──────────────────────────────────────────────────
-
 async function handleFollow(event: FollowEvent) {
   const liffId  = process.env.NEXT_PUBLIC_LIFF_ID;
   const liffUrl = liffId ? `https://liff.line.me/${liffId}` : null;
-
   const text = liffUrl
     ? `えんがおサポートへようこそ！\n\n健康記録はリッチメニューの「健康記録」ボタンから入力できます。\n\nまたはこちらから: ${liffUrl}`
     : 'えんがおサポートへようこそ！\n\n管理者にLIFF IDの設定を依頼してください。';
-
   await replyWithFallback(event.replyToken, event.source.userId, { type: 'text', text });
 }
 
 // ── POST エントリポイント ─────────────────────────────────────────
-
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const signature = request.headers.get('x-line-signature');
   if (!signature) return new NextResponse('Missing signature', { status: 401 });
@@ -214,11 +196,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   let payload: { events: LineEvent[] };
-  try {
-    payload = JSON.parse(body);
-  } catch {
-    return new NextResponse('Invalid JSON', { status: 400 });
-  }
+  try { payload = JSON.parse(body); }
+  catch { return new NextResponse('Invalid JSON', { status: 400 }); }
 
   for (const event of payload.events ?? []) {
     try {
@@ -227,7 +206,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       } else if (event.type === 'follow') {
         await handleFollow(event as FollowEvent);
       }
-      // postbackは不要になったためスキップ
     } catch (err) {
       console.error('[webhook] error:', err);
     }
