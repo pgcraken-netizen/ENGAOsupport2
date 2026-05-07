@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from 'next/server';
 // 認証不要なパス（前方一致）
 const PUBLIC_PATHS = [
   '/login',
+  '/liff/',              // LIFF記録ページ（LINE内WebApp）
+  '/api/liff/',          // LIFF APIエンドポイント
   '/api/line/',          // LINE Webhook・Action
   '/api/auth/',          // ログイン・ログアウト
   '/api/cron/',          // Cron jobs (Bearer認証で保護)
