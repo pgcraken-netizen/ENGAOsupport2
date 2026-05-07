@@ -14,7 +14,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyLineSignature } from '@/lib/line/verify';
 import { createServiceClient } from '@/lib/supabase/server';
-import { replyWithFallback, getLineClient } from '@/lib/line/client';
+import { replyWithFallback } from '@/lib/line/client';
 
 export const runtime = 'nodejs';
 
@@ -70,17 +70,6 @@ async function findPatient(text: string, facilityId: string) {
   return null;
 }
 
-async function getDisplayName(lineUserId: string, groupId?: string): Promise<string> {
-  try {
-    const client = getLineClient();
-    const profile = groupId
-      ? await client.getGroupMemberProfile(groupId, lineUserId)
-      : await client.getProfile(lineUserId);
-    return profile.displayName;
-  } catch {
-    return '不明';
-  }
-}
 
 // ── LIFFリンクFlex（利用者名が一致した場合の返信） ─────────────
 
