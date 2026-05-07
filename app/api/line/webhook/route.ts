@@ -1,14 +1,18 @@
 /**
- * LINE Webhook
+ * LINE Webhook - 完全リライト
  *
- * 記録フロー（新設計）:
- *  1. スタッフがグループに利用者名（または略称）を送信
- *  2. 前回記録をコピー or「全て健康」デフォルトで draft を作成
- *  3. scoreFormFlex（ボタン式フォーム）を返信
- *  4. スコアボタンタップ → postback(a:"ss") → DBを更新してフォーム再描画
- *  5. 「記録する」ボタン → postback(a:"sr") → confirmed に確定
+ * 重複除去の仕組み:
+ *   records テーブルの line_message_id カラムに UNIQUE インデックスを付与。
+ *   テキストメッセージ受信時、line_message_id を含む INSERT を即座に実行。
+ *   → 成功: 新規メッセージ → 処理継続
+ *   → UNIQUE違反(23505): LINEのリトライ/重複 → 即座に 200 を返して終了
  *
- * 日時・担当名は LINE プロフィールから自動取得
+ *   これは DB レベルで原子的に保証されるため、
+ *   並行 2 リクエストが来ても必ず 1 件だけ処理される。
+ *
+ * スコア編集フロー:
+ *   ボタンタップ → postback(a:"ss") → DB更新 → フォーム再描画
+ *   確定ボタン  → postback(a:"sr") → confirmed に変更 → 完了メッセージ
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -16,379 +20,225 @@ import { verifyLineSignature } from '@/lib/line/verify';
 import { createServiceClient } from '@/lib/supabase/server';
 import { buildScoreFormFlex, ScoreFormState } from '@/lib/line/flex/scoreFormFlex';
 import { replyWithFallback, getLineClient } from '@/lib/line/client';
-import { MealScore, HealthScore, ExcretionScore, HydrationScore } from '@/types/record';
+import type { MealScore, HealthScore, ExcretionScore, HydrationScore } from '@/types/record';
 
 export const runtime = 'nodejs';
 
-// ─── デフォルト値（全て健康） ─────────────────────────────────
+// ── デフォルト値（全て健康） ─────────────────────────────────────
 const DEFAULT_MEAL:      MealScore      = '完食';
 const DEFAULT_HEALTH:    HealthScore    = '良好';
 const DEFAULT_EXCRETION: ExcretionScore = '正常';
 const DEFAULT_HYDRATION: HydrationScore = '十分';
 
-// ─── LINE イベント型 ──────────────────────────────────────────
-interface LineTextMessage {
+// ── LINE イベント型 ──────────────────────────────────────────────
+interface TextMessageEvent {
   type: 'message';
   replyToken: string;
   source: { userId: string; groupId?: string; type: string };
   message: { type: 'text'; id: string; text: string };
-  webhookEventId?: string;  // LINE固有イベントID
 }
-interface LinePostbackEvent {
+interface PostbackEvent {
   type: 'postback';
   replyToken: string;
-  source: { userId: string; groupId?: string; type: string };
+  source: { userId: string; groupId?: string };
   postback: { data: string };
 }
-interface LineFollowEvent {
+interface FollowEvent {
   type: 'follow';
   replyToken: string;
   source: { userId: string };
 }
-type LineEvent = LineTextMessage | LinePostbackEvent | LineFollowEvent;
+type LineEvent = TextMessageEvent | PostbackEvent | FollowEvent;
 
-// ─── ヘルパー ─────────────────────────────────────────────────
-async function getStaffAndFacility(lineUserId: string) {
+// ── ヘルパー関数 ─────────────────────────────────────────────────
+
+async function getFacilityAndStaff(lineUserId: string) {
   const supabase = createServiceClient();
   const { data: staff } = await supabase
     .from('staff')
-    .select('*')
+    .select('id, name, facility_id')
     .eq('line_user_id', lineUserId)
-    .single();
+    .maybeSingle();
+
   const facilityId =
     staff?.facility_id ??
-    (await supabase.from('facilities').select('id').limit(1).single()).data?.id ?? null;
+    (await supabase.from('facilities').select('id').limit(1).maybeSingle()).data?.id ??
+    null;
+
   return { staff, facilityId };
 }
 
 async function getDisplayName(
   lineUserId: string,
-  groupId: string | undefined,
-  staffName: string | null,
+  groupId?: string,
+  staffName?: string | null,
 ): Promise<string> {
   if (staffName) return staffName;
   try {
     const client = getLineClient();
-    if (groupId) {
-      const profile = await client.getGroupMemberProfile(groupId, lineUserId);
-      return profile.displayName;
-    } else {
-      const profile = await client.getProfile(lineUserId);
-      return profile.displayName;
-    }
+    const profile = groupId
+      ? await client.getGroupMemberProfile(groupId, lineUserId)
+      : await client.getProfile(lineUserId);
+    return profile.displayName;
   } catch {
     return '不明';
   }
 }
 
-/** 利用者名テキストからDB検索（スペース区切りで各トークンを試す） */
 async function findPatient(text: string, facilityId: string) {
   const supabase = createServiceClient();
-  // 全角・半角スペースで分割して各トークンを試す
   const tokens = text.trim().split(/[\s　]+/);
   for (const token of tokens) {
     const query = token.replace(/さん|様|くん|ちゃん$/g, '');
     if (query.length < 2) continue;
     const { data } = await supabase
       .from('patients')
-      .select('*')
+      .select('id, name, room_number')
       .eq('facility_id', facilityId)
       .eq('is_active', true)
       .ilike('name', `%${query}%`)
-      .limit(1);
-    if (data?.[0]) return { patient: data[0], matchedToken: token };
+      .limit(1)
+      .maybeSingle();
+    if (data) return data;
   }
   return null;
 }
 
-/** 利用者の最新確定記録を取得 */
-async function getLastRecord(patientId: string, facilityId: string) {
+async function getLastConfirmedScores(patientId: string, facilityId: string) {
   const supabase = createServiceClient();
   const { data } = await supabase
     .from('records')
-    .select('meal,health,excretion,hydration,care_tags')
+    .select('meal, health, excretion, hydration')
     .eq('patient_id', patientId)
     .eq('facility_id', facilityId)
     .eq('status', 'confirmed')
     .order('recorded_at', { ascending: false })
-    .limit(1);
-  return data?.[0] ?? null;
-}
-
-/** draft レコードを作成して ID を返す */
-async function createDraftRecord(params: {
-  facilityId: string;
-  staffId: string | null;
-  patientId: string;
-  lineUserId: string;
-  displayName: string;
-  originalText: string;
-  meal: MealScore;
-  health: HealthScore;
-  excretion: ExcretionScore;
-  hydration: HydrationScore;
-}) {
-  const supabase = createServiceClient();
-  const { data, error } = await supabase
-    .from('records')
-    .insert({
-      facility_id: params.facilityId,
-      patient_id: params.patientId,
-      staff_id: params.staffId,
-      line_user_id: params.lineUserId,
-      line_display_name: params.displayName,
-      status: 'draft',
-      meal: params.meal,
-      health: params.health,
-      excretion: params.excretion,
-      hydration: params.hydration,
-      care_tags: [],
-      original_text: params.originalText,
-      confidence: 1,
-      is_incident: false,
-      incident_keywords: [],
-      patient_candidates: [],
-      recorded_at: new Date().toISOString(),
-    })
-    .select()
-    .single();
-  if (error) throw error;
+    .limit(1)
+    .maybeSingle();
   return data;
 }
 
-// ─── メッセージ処理 ───────────────────────────────────────────
-async function handleTextMessage(event: LineTextMessage) {
+// ── テキストメッセージ処理 ────────────────────────────────────────
+
+async function handleTextMessage(event: TextMessageEvent) {
   const { replyToken, source, message } = event;
   const lineUserId = source.userId;
-  const groupId = source.groupId;
-  const text = message.text.trim();
+  const groupId    = source.groupId;
+  const text       = message.text.trim();
+  const lineMessageId = message.id;
 
-  const lineMessageId = message.id;  // LINEメッセージ固有ID
-  console.log('[webhook] text received:', JSON.stringify({ text, lineUserId, groupId, lineMessageId }));
+  console.log('[webhook] text:', JSON.stringify({ text: text.substring(0, 50), lineUserId, lineMessageId }));
 
   // 空・コマンド系は無視
   if (!text || text === '未確定' || text === '申し送り') return;
 
-  // ボット自身の返信パターンを除外（グループpushMessageのエコーによる無限ループ防止）
-  const BOT_REPLY_PREFIXES = ['📋', '✅', '利用者名が見つかりませんでした', 'システムエラー', '記録の作成に失敗'];
-  if (BOT_REPLY_PREFIXES.some(p => text.startsWith(p))) {
-    console.log('[webhook] skipping bot own message (loop prevention)');
+  // ボット自身のメッセージをスキップ（安全策）
+  const BOT_PREFIXES = ['📋', '✅', '⚠️', '利用者名が見つかりません', 'システムエラー', '記録の作成に失敗', 'えんがおサポートへようこそ'];
+  if (BOT_PREFIXES.some(p => text.startsWith(p))) {
+    console.log('[webhook] skipping bot message');
     return;
   }
 
-  // ── LINEメッセージIDで重複除去 ────────────────────────────────
-  // LINEはwebhookが5秒以内に返らないとリトライするため同一メッセージが複数回届く場合がある
-  // original_text に "line_msg:<id>" を保存し、重複チェックに使用（スキーマ変更不要）
-  {
-    const supabaseDedup = createServiceClient();
-    const sentinelKey = `line_msg:${lineMessageId}`;
-    const { data: dup } = await supabaseDedup
-      .from('records')
-      .select('id')
-      .eq('original_text', sentinelKey)
-      .maybeSingle();
-    if (dup) {
-      console.log('[webhook] duplicate LINE message, skipping:', lineMessageId);
-      return;
-    }
-  }
-  // ────────────────────────────────────────────────────────────────
+  // 利用者名として使えない長文はスキップ
+  if (text.length > 20) return;
 
-  const { staff, facilityId } = await getStaffAndFacility(lineUserId);
-  console.log('[webhook] staff:', staff?.id ?? 'null', 'facilityId:', facilityId ?? 'null');
-
+  // ── 施設・スタッフ取得 ──────────────────────────────────────────
+  const { staff, facilityId } = await getFacilityAndStaff(lineUserId);
   if (!facilityId) {
     console.error('[webhook] facilityId not found');
     await replyWithFallback(replyToken, lineUserId, {
       type: 'text',
-      text: 'システムエラー: 施設情報が見つかりません。管理者にお問い合わせください。',
+      text: 'システムエラー: 施設情報が見つかりません。管理者に連絡してください。',
     });
     return;
   }
 
-  const displayName = await getDisplayName(lineUserId, groupId, staff?.name ?? null);
+  const displayName = await getDisplayName(lineUserId, groupId, staff?.name);
 
-  // 利用者名マッチング（20文字以内なら検索）
-  if (text.length <= 20) {
-    const result = await findPatient(text, facilityId);
-    console.log('[webhook] findPatient result:', result ? result.patient.name : 'null');
-    if (result) {
-      const { patient } = result;
-      // 前回記録をコピー or デフォルト
-      console.log('[webhook] getLastRecord for patientId:', patient.id);
-      const last = await getLastRecord(patient.id, facilityId);
-      console.log('[webhook] last record:', last ? JSON.stringify(last) : 'null');
-
-      let meal      = (last?.meal      as MealScore)      ?? DEFAULT_MEAL;
-      let health    = (last?.health    as HealthScore)    ?? DEFAULT_HEALTH;
-      let excretion = (last?.excretion as ExcretionScore) ?? DEFAULT_EXCRETION;
-      let hydration = (last?.hydration as HydrationScore) ?? DEFAULT_HYDRATION;
-      // 直近5分以内に同一ユーザー・同一利用者のドラフトがあれば再利用（重複作成防止）
-      const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-      const { data: existingDraft } = await createServiceClient()
-        .from('records')
-        .select('id, meal, health, excretion, hydration')
-        .eq('patient_id', patient.id)
-        .eq('line_user_id', lineUserId)
-        .eq('status', 'draft')
-        .gte('created_at', fiveMinAgo)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (existingDraft) {
-        console.log('[webhook] reusing existing draft:', existingDraft.id);
-        // 既存ドラフトのスコアを上書き（最新の前回コピーを反映）
-        meal      = (existingDraft.meal      as MealScore)      ?? meal;
-        health    = (existingDraft.health    as HealthScore)    ?? health;
-        excretion = (existingDraft.excretion as ExcretionScore) ?? excretion;
-        hydration = (existingDraft.hydration as HydrationScore) ?? hydration;
-        // 既存ドラフトがある = すでにreplyMessage済み → pushMessageフォールバックは使わない
-        // （LINEリトライで二重送信しないために replyMessage のみ試行）
-      }
-
-      console.log('[webhook] creating draft... facilityId:', facilityId, 'patientId:', patient.id);
-      const draft = existingDraft ?? await createDraftRecord({
-        facilityId,
-        staffId:      staff?.id ?? null,
-        patientId:    patient.id,
-        lineUserId,
-        displayName,
-        originalText: `line_msg:${lineMessageId}`,  // 重複防止キー兼originalText
-        meal, health, excretion, hydration,
-      }).catch((e) => { console.error('[webhook] createDraft error:', e?.message ?? e, JSON.stringify(e)); return null; });
-
-      console.log('[webhook] draft result:', draft ? draft.id : 'null (failed)');
-
-      if (!draft) {
-        await replyWithFallback(replyToken, lineUserId, {
-          type: 'text',
-          text: '記録の作成に失敗しました。もう一度お試しください。',
-        }, groupId);
-        return;
-      }
-
-      const formState: ScoreFormState = {
-        recordId:       draft.id,
-        patientName:    patient.name,
-        staffName:      displayName,
-        meal, health, excretion, hydration,
-        isFromPrevious: !!last,
-      };
-
-      console.log('[webhook] building flex message...');
-      let flex;
-      try {
-        flex = buildScoreFormFlex(formState);
-        console.log('[webhook] flex built, altText:', flex.altText);
-      } catch (fe) {
-        console.error('[webhook] buildScoreFormFlex error:', fe);
-        await replyWithFallback(replyToken, lineUserId, {
-          type: 'text',
-          text: `📋 ${patient.name}さん\n食事:${meal} 健康:${health} 排泄:${excretion} 水分:${hydration}\n（フォームエラーのためテキスト表示）`,
-        }, groupId);
-        return;
-      }
-
-      const isNewDraft = !existingDraft;
-      console.log('[webhook] sending reply... replyToken prefix:', replyToken?.substring(0, 8), 'groupId:', groupId ?? 'none', 'isNewDraft:', isNewDraft);
-      try {
-        await replyWithFallback(
-          replyToken,
-          lineUserId,
-          flex as unknown as Parameters<typeof replyWithFallback>[2],
-          isNewDraft ? groupId : undefined,  // 新規ドラフトのみgroupIdフォールバック使用（再利用時は二重送信防止）
-        );
-        console.log('[webhook] reply sent successfully');
-      } catch (re) {
-        if (isNewDraft) {
-          // 新規ドラフトの場合のみテキストフォールバック
-          console.error('[webhook] replyWithFallback error:', re);
-          try {
-            await replyWithFallback(replyToken, lineUserId, {
-              type: 'text',
-              text: `📋 ${patient.name}さん\n食事:${meal} 健康:${health} 排泄:${excretion} 水分:${hydration}\n（送信エラーのためテキスト表示）`,
-            }, groupId);
-            console.log('[webhook] text fallback sent');
-          } catch (te) {
-            console.error('[webhook] text fallback also failed:', te);
-          }
-        } else {
-          console.log('[webhook] reply for existing draft failed (likely duplicate webhook), suppressed');
-        }
-      }
-      return;
-    }
-  }
-
-  // 利用者名が見つからない場合
-  const supabase = createServiceClient();
-  const { data: patients } = await supabase
-    .from('patients')
-    .select('name')
-    .eq('facility_id', facilityId)
-    .eq('is_active', true)
-    .order('name')
-    .limit(10);
-  const nameList = (patients ?? []).map((p) => `・${p.name}`).join('\n');
-
-  await replyWithFallback(replyToken, lineUserId, {
-    type: 'text',
-    text: `利用者名が見つかりませんでした。\n以下の名前（または一部）を送ってください:\n\n${nameList}`,
-  }, groupId);
-}
-
-// ─── ポストバック処理 ─────────────────────────────────────────
-async function handlePostback(event: LinePostbackEvent) {
-  const { replyToken, source, postback } = event;
-  const lineUserId = source.userId;
-  const groupId = source.groupId;
-
-  let data: Record<string, unknown>;
-  try {
-    data = JSON.parse(postback.data);
-  } catch {
+  // ── 利用者検索 ─────────────────────────────────────────────────
+  const patient = await findPatient(text, facilityId);
+  if (!patient) {
+    const supabase = createServiceClient();
+    const { data: patients } = await supabase
+      .from('patients')
+      .select('name')
+      .eq('facility_id', facilityId)
+      .eq('is_active', true)
+      .order('name')
+      .limit(10);
+    const list = (patients ?? []).map(p => `・${p.name}`).join('\n');
+    await replyWithFallback(replyToken, lineUserId, {
+      type: 'text',
+      text: `利用者名が見つかりませんでした。\n以下の名前（一部でも可）を送ってください:\n\n${list}`,
+    }, groupId);
     return;
   }
 
-  const action   = data.a as string;
-  const recordId = data.r as string;
-  if (!recordId) return;
+  // ── 前回スコア取得（デフォルト値のベース） ─────────────────────
+  const last      = await getLastConfirmedScores(patient.id, facilityId);
+  const meal      = (last?.meal      ?? DEFAULT_MEAL)      as MealScore;
+  const health    = (last?.health    ?? DEFAULT_HEALTH)    as HealthScore;
+  const excretion = (last?.excretion ?? DEFAULT_EXCRETION) as ExcretionScore;
+  const hydration = (last?.hydration ?? DEFAULT_HYDRATION) as HydrationScore;
 
+  // ── ATOMIC INSERT（重複除去の核心） ────────────────────────────
+  // UNIQUE インデックス (line_message_id WHERE NOT NULL) により
+  // 並行リクエストが来ても INSERT は 1 件だけ成功する
   const supabase = createServiceClient();
+  const { data: draft, error: insertError } = await supabase
+    .from('records')
+    .insert({
+      facility_id:        facilityId,
+      line_message_id:    lineMessageId,   // ← UNIQUEキー（重複除去）
+      original_text:      text,            // ← 実際のメッセージテキスト
+      status:             'draft',
+      patient_id:         patient.id,
+      staff_id:           staff?.id ?? null,
+      line_user_id:       lineUserId,
+      line_display_name:  displayName,
+      meal,
+      health,
+      excretion,
+      hydration,
+      care_tags:          [],
+      confidence:         1,
+      is_incident:        false,
+      incident_keywords:  [],
+      patient_candidates: [],
+      recorded_at:        new Date().toISOString(),
+    })
+    .select('id')
+    .single();
 
-  // ── スコアボタンタップ: フォーム再描画 ──
-  if (action === 'ss') {
-    const field = data.f as string;
-    const value = data.v as string;
+  if (insertError) {
+    if (insertError.code === '23505') {
+      // UNIQUE違反 = LINEのリトライによる重複 → 即座にスキップ
+      console.log('[webhook] duplicate line_message_id, skipping:', lineMessageId);
+      return;
+    }
+    console.error('[webhook] insert error:', insertError.message, insertError.code);
+    await replyWithFallback(replyToken, lineUserId, {
+      type: 'text',
+      text: '記録の作成に失敗しました。もう一度お試しください。',
+    }, groupId);
+    return;
+  }
 
-    // DB更新
-    await supabase
-      .from('records')
-      .update({ [field]: value, updated_at: new Date().toISOString() })
-      .eq('id', recordId);
+  console.log('[webhook] draft created:', draft.id, 'for patient:', patient.name);
 
-    // 最新状態を取得してフォーム再描画
-    const { data: rec } = await supabase
-      .from('records')
-      .select('*, patient:patients(name), staff:staff!records_staff_id_fkey(name)')
-      .eq('id', recordId)
-      .single();
-    if (!rec) return;
+  // ── Flex フォーム送信 ──────────────────────────────────────────
+  const formState: ScoreFormState = {
+    recordId:      draft.id,
+    patientName:   patient.name,
+    staffName:     displayName,
+    meal,
+    health,
+    excretion,
+    hydration,
+    isFromPrevious: !!last,
+  };
 
-    const { staff } = await getStaffAndFacility(lineUserId);
-    const displayName = await getDisplayName(lineUserId, groupId, (rec as Record<string,unknown> & {staff?: {name?:string}})?.staff?.name ?? staff?.name ?? null);
-
-    const formState: ScoreFormState = {
-      recordId,
-      patientName:    (rec as Record<string,unknown> & {patient?: {name?:string}})?.patient?.name ?? '不明',
-      staffName:      displayName,
-      meal:      (rec.meal      ?? DEFAULT_MEAL)      as MealScore,
-      health:    (rec.health    ?? DEFAULT_HEALTH)    as HealthScore,
-      excretion: (rec.excretion ?? DEFAULT_EXCRETION) as ExcretionScore,
-      hydration: (rec.hydration ?? DEFAULT_HYDRATION) as HydrationScore,
-      isFromPrevious: false,
-    };
+  try {
     const flex = buildScoreFormFlex(formState);
     await replyWithFallback(
       replyToken,
@@ -396,17 +246,119 @@ async function handlePostback(event: LinePostbackEvent) {
       flex as unknown as Parameters<typeof replyWithFallback>[2],
       groupId,
     );
+    console.log('[webhook] flex form sent, recordId:', draft.id);
+  } catch (err) {
+    console.error('[webhook] reply error:', err);
+    try {
+      await replyWithFallback(replyToken, lineUserId, {
+        type: 'text',
+        text: `📋 ${patient.name}さん\n食事:${meal} 健康:${health} 排泄:${excretion} 水分:${hydration}\n（フォーム表示エラーのためテキスト表示）`,
+      }, groupId);
+    } catch { /* ignore */ }
+  }
+}
+
+// ── ポストバック処理 ──────────────────────────────────────────────
+
+async function handlePostback(event: PostbackEvent) {
+  const { replyToken, source, postback } = event;
+  const lineUserId = source.userId;
+  const groupId    = source.groupId;
+
+  let parsed: Record<string, string>;
+  try {
+    parsed = JSON.parse(postback.data);
+  } catch {
     return;
   }
 
-  // ── 記録する（確定） ──
+  const action   = parsed.a;
+  const recordId = parsed.r;
+  if (!action || !recordId) return;
+
+  const supabase = createServiceClient();
+
+  // ── スコアボタンタップ: DB更新 → フォーム再描画 ──────────────
+  if (action === 'ss') {
+    const field = parsed.f;  // 'meal' | 'health' | 'excretion' | 'hydration'
+    const value = parsed.v;
+    if (!field || !value) return;
+
+    const ALLOWED_FIELDS = ['meal', 'health', 'excretion', 'hydration'];
+    if (!ALLOWED_FIELDS.includes(field)) return;
+
+    console.log('[webhook] score update:', { recordId, field, value });
+
+    // DB更新
+    const { error: updateError } = await supabase
+      .from('records')
+      .update({ [field]: value, updated_at: new Date().toISOString() })
+      .eq('id', recordId)
+      .eq('status', 'draft');
+
+    if (updateError) {
+      console.error('[webhook] score update error:', updateError.message);
+      return;
+    }
+
+    // 最新レコード取得
+    const { data: rec } = await supabase
+      .from('records')
+      .select('id, meal, health, excretion, hydration, patient_id, line_display_name')
+      .eq('id', recordId)
+      .maybeSingle();
+
+    if (!rec) return;
+
+    // 利用者名取得
+    const { data: patient } = await supabase
+      .from('patients')
+      .select('name')
+      .eq('id', rec.patient_id)
+      .maybeSingle();
+
+    const displayName = await getDisplayName(lineUserId, groupId, rec.line_display_name);
+
+    const formState: ScoreFormState = {
+      recordId,
+      patientName:   patient?.name ?? '不明',
+      staffName:     displayName,
+      meal:      (rec.meal      ?? DEFAULT_MEAL)      as MealScore,
+      health:    (rec.health    ?? DEFAULT_HEALTH)    as HealthScore,
+      excretion: (rec.excretion ?? DEFAULT_EXCRETION) as ExcretionScore,
+      hydration: (rec.hydration ?? DEFAULT_HYDRATION) as HydrationScore,
+      isFromPrevious: false,
+    };
+
+    const flex = buildScoreFormFlex(formState);
+    await replyWithFallback(
+      replyToken,
+      lineUserId,
+      flex as unknown as Parameters<typeof replyWithFallback>[2],
+      groupId,
+    );
+    console.log('[webhook] form redrawn after score update:', { field, value });
+    return;
+  }
+
+  // ── 記録する（確定） ─────────────────────────────────────────
   if (action === 'sr') {
     const { data: rec } = await supabase
       .from('records')
-      .select('*, patient:patients(name)')
+      .select('id, meal, health, excretion, hydration, patient_id, status')
       .eq('id', recordId)
-      .single();
+      .maybeSingle();
+
     if (!rec) return;
+
+    // 二重確定を防止
+    if (rec.status === 'confirmed') {
+      await replyWithFallback(replyToken, lineUserId, {
+        type: 'text',
+        text: 'この記録はすでに確定済みです。',
+      }, groupId);
+      return;
+    }
 
     await supabase
       .from('records')
@@ -417,38 +369,47 @@ async function handlePostback(event: LinePostbackEvent) {
       })
       .eq('id', recordId);
 
-    const patientName = (rec as Record<string,unknown> & {patient?: {name?:string}})?.patient?.name ?? '利用者';
+    const { data: patient } = await supabase
+      .from('patients')
+      .select('name')
+      .eq('id', rec.patient_id)
+      .maybeSingle();
+
     const scores = [
-      `🍽 食事: ${rec.meal ?? '－'}`,
-      `💊 健康: ${rec.health ?? '－'}`,
+      `🍽 食事: ${rec.meal      ?? '－'}`,
+      `💊 健康: ${rec.health    ?? '－'}`,
       `🚽 排泄: ${rec.excretion ?? '－'}`,
       `💧 水分: ${rec.hydration ?? '－'}`,
     ].join('\n');
 
     await replyWithFallback(replyToken, lineUserId, {
       type: 'text',
-      text: `✅ ${patientName}さんの記録を保存しました\n\n${scores}`,
+      text: `✅ ${patient?.name ?? '利用者'}さんの記録を保存しました\n\n${scores}`,
     }, groupId);
+
+    console.log('[webhook] record confirmed:', recordId);
   }
 }
 
-// ─── フォロー ─────────────────────────────────────────────────
-async function handleFollow(event: LineFollowEvent) {
-  const { replyToken, source } = event;
-  await replyWithFallback(replyToken, source.userId, {
+// ── フォロー処理 ──────────────────────────────────────────────────
+
+async function handleFollow(event: FollowEvent) {
+  await replyWithFallback(event.replyToken, event.source.userId, {
     type: 'text',
     text: 'えんがおサポートへようこそ！\n\nLINEグループに利用者名を送るだけで記録フォームが開きます。\n\n例）「田中」「小高さん」\n\n日時・担当名は自動取得します。変化があった部分だけボタンで変更してください。',
   });
 }
 
-// ─── POST エントリポイント ────────────────────────────────────
+// ── POST エントリポイント ─────────────────────────────────────────
+
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const signature = request.headers.get('x-line-signature');
   if (!signature) return new NextResponse('Missing signature', { status: 401 });
 
   const body = await request.text();
-  const isValid = verifyLineSignature(body, signature, process.env.LINE_CHANNEL_SECRET ?? '');
-  if (!isValid) return new NextResponse('Invalid signature', { status: 401 });
+  if (!verifyLineSignature(body, signature, process.env.LINE_CHANNEL_SECRET ?? '')) {
+    return new NextResponse('Invalid signature', { status: 401 });
+  }
 
   let payload: { events: LineEvent[] };
   try {
@@ -457,19 +418,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return new NextResponse('Invalid JSON', { status: 400 });
   }
 
-  // イベントを順次処理（awaitで確実に実行）
-  // Vercelサーバーレスではfire-and-forgetは関数終了で打ち切られるため同期処理が安全
   for (const event of payload.events ?? []) {
     try {
-      if (event.type === 'message' && (event as LineTextMessage).message?.type === 'text') {
-        await handleTextMessage(event as LineTextMessage);
+      if (event.type === 'message' && (event as TextMessageEvent).message?.type === 'text') {
+        await handleTextMessage(event as TextMessageEvent);
       } else if (event.type === 'postback') {
-        await handlePostback(event as LinePostbackEvent);
+        await handlePostback(event as PostbackEvent);
       } else if (event.type === 'follow') {
-        await handleFollow(event as LineFollowEvent);
+        await handleFollow(event as FollowEvent);
       }
     } catch (err) {
-      console.error('[Webhook error]', err);
+      console.error('[webhook] unhandled error:', err);
     }
   }
 
