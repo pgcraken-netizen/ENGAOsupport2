@@ -119,8 +119,8 @@ export async function POST(request: NextRequest) {
       .eq('id', existing.id);
 
     if (error) {
-      console.error('[liff/record] update error:', error);
-      return NextResponse.json({ error: 'update failed' }, { status: 500 });
+      console.error('[liff/record] update error:', JSON.stringify(error));
+      return NextResponse.json({ error: 'update failed', detail: error.message, code: error.code }, { status: 500 });
     }
     recordId = existing.id;
     action   = 'updated';
@@ -138,11 +138,6 @@ export async function POST(request: NextRequest) {
         meal, health, excretion, hydration,
         comment:            comment ?? null,
         original_text:      `[LIFF] ${meal}/${health}/${excretion}/${hydration}`,
-        care_tags:          [],
-        confidence:         1,
-        is_incident:        false,
-        incident_keywords:  [],
-        patient_candidates: [],
         recorded_at:        now,
         confirmed_at:       now,
       })
@@ -150,8 +145,8 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (insertError) {
-      console.error('[liff/record] insert error:', insertError);
-      return NextResponse.json({ error: 'insert failed' }, { status: 500 });
+      console.error('[liff/record] insert error:', JSON.stringify(insertError));
+      return NextResponse.json({ error: 'insert failed', detail: insertError.message, code: insertError.code }, { status: 500 });
     }
     recordId = created.id;
     action   = 'created';

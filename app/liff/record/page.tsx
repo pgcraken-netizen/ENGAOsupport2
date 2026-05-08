@@ -132,14 +132,19 @@ export default function LiffRecordPage() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lineUserId, displayName, facilityId, staffId, patientId: selectedPatient.id, ...scores, comment: comment.trim() || null }),
       });
-      if (!res.ok) throw new Error('submit failed');
       const data = await res.json();
+      if (!res.ok) {
+        const detail = data?.detail ?? data?.error ?? 'unknown';
+        const code   = data?.code   ?? '';
+        throw new Error(`${detail} [${code}]`);
+      }
       setSavedAction(data.action ?? 'created');
       // 本日済みバッジを更新
       setRecordedToday(prev => { const next = new Set(Array.from(prev)); next.add(selectedPatient.id); return next; });
       setStep('success');
-    } catch {
-      setErrorMsg('保存に失敗しました。もう一度お試しください。');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrorMsg(`保存に失敗しました。\n${msg}`);
     } finally {
       setSubmitting(false);
     }
