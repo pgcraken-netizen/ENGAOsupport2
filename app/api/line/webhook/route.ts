@@ -5,6 +5,7 @@
  *   - グループに利用者名が送られたら LIFFリンクボタンで返信
  *   - 受信時に facilities.line_group_id を自動保存（通知送信に使用）
  *   - フォロー時のウェルカムメッセージ
+ *   - webhook_log テーブルで１メッセージ１返信を保証（重複防止）
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -126,9 +127,29 @@ function buildLiffLinkFlex(patientName: string, liffUrl: string) {
 // ── テキストメッセージ処理 ────────────────────────────────────────
 async function handleTextMessage(event: TextMessageEvent) {
   const { replyToken, source, message } = event;
-  const lineUserId = source.userId;
-  const groupId    = source.groupId;
-  const text       = message.text.trim();
+  const lineUserId    = source.userId;
+  const groupId       = source.groupId;
+  const text          = message.text.trim();
+  const lineMessageId = message.id;
+
+  // ── 重複処理防止（１メッセージ１返信を保証） ──────────────────
+  // LINEは5秒以内に200が返らないとリトライするため、
+  // 複数のServerlessインスタンスが同じメッセージを処理することがある。
+  // PRIMARY KEY INSERTの競合エラー(23505)で二重処理をアトミックに防ぐ。
+  const supabaseDedup = createServiceClient();
+  const { error: dedupError } = await supabaseDedup
+    .from('webhook_log')
+    .insert({ line_message_id: lineMessageId });
+  if (dedupError) {
+    if (dedupError.code === '23505') {
+      console.log('[webhook] duplicate message, skipping:', lineMessageId);
+      return; // 既に別インスタンスが処理済み
+    }
+    // テーブル未作成の場合は処理を続行（42P01 = undefined_table）
+    if (dedupError.code !== '42P01') {
+      console.warn('[webhook] dedup insert error:', dedupError.code, dedupError.message);
+    }
+  }
 
   if (!text || text.length > 20) return;
   const BOT_PREFIXES = ['📋', '✅', '⚠️', '利用者名が', 'システムエラー', '記録の作成', 'えんがおサポート'];
